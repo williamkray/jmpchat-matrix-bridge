@@ -273,6 +273,73 @@ docker run -d --name jmpchat-matrix-bridge \
 
 Use `appservice.hostname: 0.0.0.0` in config so the bridge listens on all interfaces. For SQLite, set `database.uri` to `file:/data/jmpchat-matrix-bridge.db?_txlock=immediate` so the database lives in the same mounted directory. Postgres is also supported.
 
+## Nix
+
+This repo ships a flake: the bridge as a package, an overlay, and a NixOS module.
+
+```bash
+# build (and run) the binary
+nix run .# -- --version
+nix build .#jmpchat-matrix-bridge
+```
+
+Module usage (in your NixOS flake):
+
+```nix
+inputs.jmpchat.url = "github:williamkray/jmpchat-matrix-bridge";
+
+# NixOS configuration
+imports = [ jmpchat.nixosModules.default ];
+services.jmpchat-matrix-bridge = {
+  enable = true;
+  settings = {
+    homeserver = { address = "https://matrix.example.org"; domain = "example.org"; };
+    appservice = { id = "jabber"; address = "http://127.0.0.1:29318";
+                   hostname = "127.0.0.1"; port = 29318;
+                   bot = { username = "jabberbot"; displayname = "Jabber bridge bot"; }; };
+    bridge.permissions."example.org" = "user";
+    database = { type = "sqlite3-fk-wal";
+                 uri = "file:/var/lib/jmpchat-matrix-bridge/bridge.db?_txlock=immediate"; };
+    network = { cheogram = true; calls = { enabled = true; }; };
+  };
+};
+# When local Synapse is enabled, the module installs the registration as
+# jabber-registration.yaml in Synapse's data dir (/var/lib/matrix-synapse by
+# default); add that path to Synapse's app_service_config_files. For a remote
+# or other homeserver, retrieve /var/lib/jmpchat-matrix-bridge/registration.yaml
+# and register it yourself.
+```
+
+Notes:
+
+- The module builds with the upstream build configuration (SIP calls via
+  libopus, CGO sqlite3) but uses mautrix-go's pure-Go `goolm` implementation for
+  E2BE instead of libolm, which is unmaintained and marked insecure in nixpkgs.
+  No nixpkgs insecure-package config is needed; goolm's pickle format is
+  compatible with libolm, so existing crypto state keeps working.
+- On first boot the init unit writes `config.yaml` from `settings`; on later
+  boots it deep-merges the template into the state copy, so settings changes
+  take effect without a reboot (the daemon restarts when `settings` change;
+  keys that only exist in the state config — generated secrets like the as/hs
+  tokens — are preserved, and a template value of exactly `generate` never
+  overwrites a generated value). The registration is generated with `-g` once
+  and, together with the config, persists in `/var/lib/jmpchat-matrix-bridge`;
+  delete both to re-bootstrap (and re-register).
+- The daemon runs as a dedicated non-root user under a systemd sandbox. Only
+  the short-lived init unit runs as root: it installs the config, generates
+  the registration once and, for a local Synapse, copies it into Synapse's
+  data dir. State (database, logs, config) lives in
+  `/var/lib/jmpchat-matrix-bridge`; the directory is mode `0700`, and the
+  generated config and registration are mode `0600`.
+- Local Synapse integration is enabled only when `services.matrix-synapse.enable`
+  is true. A local Synapse is not otherwise required.
+- If `network.calls.enabled` is true, the module opens the configured SIP
+  signalling (UDP+TCP, default 5060-5069) and RTP media (UDP, default
+  40000-40100) ranges in the firewall. With calls disabled, it opens none.
+- Values in `settings` are embedded in the world-readable Nix store. Do not put
+  secrets there: use `environmentFile` with the bridge's `env_config_prefix`
+  support instead. Generated appservice tokens are kept only in private state.
+
 ## Tracing (OpenTelemetry)
 
 Tracing is optional and **off by default**. It is enabled purely by environment variables; there is no config-file setting. When no endpoint is set, nothing is installed (no exporter, goroutines or sockets), so there is no overhead. Export problems are logged as rate-limited warnings and never stop or block the bridge.
