@@ -49,11 +49,13 @@ var (
 type xmppClient struct {
 	// parseGhostHook, when set (tests only), replaces the Matrix connector's ParseGhostMXID in mentionResolver.
 	parseGhostHook func(id.UserID) (networkid.UserID, bool)
-	loginID        networkid.UserLoginID
-	meta           *JabberLoginMeta
-	log            zerolog.Logger
-	login          *bridgev2.UserLogin
-	conn           *JabberConnector
+	// formatGhostHook, when set (tests only), replaces the Matrix connector's FormatGhostMXID for inbound mentions.
+	formatGhostHook func(networkid.UserID) id.UserID
+	loginID         networkid.UserLoginID
+	meta            *JabberLoginMeta
+	log             zerolog.Logger
+	login           *bridgev2.UserLogin
+	conn            *JabberConnector
 	// queueHook, when set (tests only), receives remote events instead of the bridgev2 queue.
 	queueHook func(bridgev2.RemoteEvent) bridgev2.EventHandlingResult
 	// noticeHook, when set (tests only), receives portal notices instead of the bridge bot.

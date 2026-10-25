@@ -224,9 +224,10 @@ func parseMessageBodyOOBIDs(t xml.TokenReader) (body, oobURL, replyID string, re
 	ids.finish()
 	rawBody := bodyBuf.String()
 	body = strings.TrimSpace(rawBody)
+	lead := utf8.RuneCountInString(rawBody[:len(rawBody)-len(strings.TrimLeftFunc(rawBody, unicode.IsSpace))])
+	ids.Mentions = shiftMentionRefs(ids.Mentions, lead)
 	if fbValid {
 		// Offsets index the raw body; the returned body is trimmed, so shift by the leading blanks.
-		lead := utf8.RuneCountInString(rawBody[:len(rawBody)-len(strings.TrimLeftFunc(rawBody, unicode.IsSpace))])
 		ids.ReplyFallback = replyFallback{Start: fbStart - lead, End: fbEnd - lead, Valid: true}
 	}
 	if ids.Retract != nil {
@@ -380,6 +381,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 				body:          body,
 				replyID:       replyID,
 				replyFallback: ids.ReplyFallback,
+				mentions:      ids.Mentions,
 				hasOOB:        oobURL != "",
 				senderID:      fromBare,
 				ts:            time.Now(),
@@ -440,6 +442,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 				senderJID = parsedSender
 				body = bodyWithoutPrefix
 				ids.ReplyFallback = replyFallback{} // offsets indexed the prefixed body
+				ids.Mentions = nil
 			} else {
 				senderJID = individuals[0]
 			}
@@ -482,6 +485,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			oobURL:         oobURL,
 			replyID:        replyID, // XEP-0461 reply ID (XMPP message ID being replied to)
 			replyFallback:  ids.ReplyFallback,
+			mentions:       ids.Mentions,
 			reactionTarget: reactionTarget,                    // XEP-0444 reaction target message ID (empty for non-reactions)
 			reactionEmojis: reactionEmojis,                    // XEP-0444 reaction emojis (empty for non-reactions)
 			stanzaID:       ids.stanzaIDBy(string(x.loginID)), // archive id assigned by our own server (untrusted `by` ignored)
@@ -627,6 +631,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			body:          body,
 			replyID:       replyID,
 			replyFallback: ids.ReplyFallback,
+			mentions:      ids.Mentions,
 			hasOOB:        oobURL != "",
 			senderID:      string(corrSender.Sender),
 			ts:            time.Now(),
@@ -722,6 +727,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			oobURL:         oobURL,
 			replyID:        replyID,
 			replyFallback:  ids.ReplyFallback,
+			mentions:       ids.Mentions,
 			groupchat:      true,
 			reactionTarget: reactionTarget,
 			reactionEmojis: reactionEmojis,
@@ -1086,6 +1092,7 @@ type jabberRemoteMessage struct {
 	reactionTarget string        // XEP-0444 reaction target message ID
 	reactionEmojis []string      // XEP-0444 reaction emojis
 	replyFallback  replyFallback // XEP-0428 fallback range of the reply quote (offsets in body code points)
+	mentions       []mentionRef  // XEP-0372 mention references (offsets in body code points); live DM and MUC only
 	groupchat      bool          // the event came from a groupchat stanza (reply/reaction ids are room stanza-ids)
 	// Stable ids stored in MessageMetadata (see dbMeta). stanzaID is only ever set from a stanza-id
 	// whose `by` is a trusted entity (room for groupchat, our account for 1:1 and MAM).
@@ -1471,9 +1478,11 @@ func (m *jabberRemoteMessage) convertMessage(ctx context.Context, portal *bridge
 	}
 	bodyText, replyTarget := textForBody(ctx, m.x, m.portalKey, m.refIsMUC(portal), m.body, m.replyID, m.replyFallback)
 
+	content := &event.MessageEventContent{MsgType: event.MsgText, Body: bodyText}
+	m.x.applyInboundMentions(portal, content, m.body, m.replyFallback, m.mentions, m.sender.IsFromMe, m.refIsMUC(portal))
 	part := &bridgev2.ConvertedMessagePart{
 		Type:    event.EventMessage,
-		Content: &event.MessageEventContent{MsgType: event.MsgText, Body: bodyText},
+		Content: content,
 	}
 
 	cm := &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{part}}

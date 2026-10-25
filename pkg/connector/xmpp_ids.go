@@ -41,6 +41,11 @@ type messageIDs struct {
 	Tombstone bool
 	scan      *retractScan
 
+	// Mentions are the XEP-0372 mention references (direct children of <message>), offsets in code
+	// points of the body as sent; parseMessageBodyOOBIDs shifts them to the trimmed body. At most
+	// maxMentionRefs, malformed ones are dropped at parse time.
+	Mentions []mentionRef
+
 	// Extras holds the XEP-0308/0085/0333/0184/subject/E2EE signals (see messageExtras); filled while
 	// tracking, the subject is complete once its end element was tracked.
 	Extras       messageExtras
@@ -107,6 +112,10 @@ func (m *messageIDs) observe(se xml.StartElement, depth int) {
 		m.subjectBuf = m.subjectBuf[:0]
 	}
 	switch {
+	case se.Name.Space == referenceNS && se.Name.Local == "reference":
+		if r, ok := parseMentionRef(se.Attr); ok && len(m.Mentions) < maxMentionRefs {
+			m.Mentions = append(m.Mentions, r)
+		}
 	case se.Name.Space == sidNS && se.Name.Local == "stanza-id":
 		by, id := attrValue(se.Attr, "by"), attrValue(se.Attr, "id")
 		if by != "" && id != "" && len(id) <= maxStableIDLen && len(m.StanzaIDs) < maxStanzaIDRefs {

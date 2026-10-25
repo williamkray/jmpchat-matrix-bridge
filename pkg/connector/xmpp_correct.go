@@ -33,6 +33,7 @@ type correction struct {
 	body          string
 	replyID       string
 	replyFallback replyFallback
+	mentions      []mentionRef // XEP-0372 mention references (offsets in body code points)
 	hasOOB        bool
 	encrypted     bool   // the correction payload is encrypted: the body is only a fallback text, never applied
 	senderID      string // sender id as stored on rows (bare JID / room/nick / login id)
@@ -85,6 +86,8 @@ type correctionEnv interface {
 	isRetracted(ctx context.Context, portal networkid.PortalID, who retractedSender, refs ...string) bool
 	// bodyText is the Matrix text for the corrected body (reply fallback handling).
 	bodyText(ctx context.Context, portal *bridgev2.Portal, c correction) string
+	// applyMentions adds Matrix mentions (formatted body, m.mentions) for the corrected text to content.
+	applyMentions(portal *bridgev2.Portal, content *event.MessageEventContent, c correction)
 	log(ctx context.Context) *zerolog.Logger
 }
 
@@ -234,10 +237,12 @@ func convertCorrection(ctx context.Context, env correctionEnv, st *correctionSta
 		return nil, bridgev2.ErrIgnoringRemoteEvent
 	}
 	st.converted = true
+	content := &event.MessageEventContent{MsgType: event.MsgText, Body: text}
+	env.applyMentions(portal, content, c)
 	return &bridgev2.ConvertedEdit{ModifiedParts: []*bridgev2.ConvertedEditPart{{
 		Part:    existing[0],
 		Type:    event.EventMessage,
-		Content: &event.MessageEventContent{MsgType: event.MsgText, Body: text},
+		Content: content,
 	}}}, nil
 }
 
@@ -289,6 +294,13 @@ func (e xmppCorrectionEnv) bodyText(ctx context.Context, portal *bridgev2.Portal
 	key := portal.PortalKey
 	text, _ := textForBody(ctx, e.x, key, refIsMUCFor(c.claim.groupchat, portal, key), c.body, c.replyID, c.replyFallback)
 	return text
+}
+
+func (e xmppCorrectionEnv) applyMentions(portal *bridgev2.Portal, content *event.MessageEventContent, c correction) {
+	key := portal.PortalKey
+	// A corrected message is "ours" when the stored sender id is our login (own echo/carbon).
+	fromMe := c.senderID == string(e.x.loginID)
+	e.x.applyInboundMentions(portal, content, c.body, c.replyFallback, c.mentions, fromMe, refIsMUCFor(c.claim.groupchat, portal, key))
 }
 
 func (e xmppCorrectionEnv) log(ctx context.Context) *zerolog.Logger { return e.x.logFor(ctx) }

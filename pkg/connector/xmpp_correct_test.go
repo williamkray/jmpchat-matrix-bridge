@@ -121,7 +121,8 @@ func (f *fakeCorrEnv) isRetracted(context.Context, networkid.PortalID, retracted
 func (f *fakeCorrEnv) bodyText(_ context.Context, _ *bridgev2.Portal, c correction) string {
 	return c.body
 }
-func (f *fakeCorrEnv) log(context.Context) *zerolog.Logger { return &f.lg }
+func (f *fakeCorrEnv) applyMentions(*bridgev2.Portal, *event.MessageEventContent, correction) {}
+func (f *fakeCorrEnv) log(context.Context) *zerolog.Logger                                    { return &f.lg }
 
 func dmFacts() portalFacts { return portalFacts{key: dmPortal(), loginID: retractTestLogin} }
 func mucFacts() portalFacts {
