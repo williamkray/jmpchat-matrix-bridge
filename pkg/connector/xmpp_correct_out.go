@@ -5,14 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
-	"maunium.net/go/mautrix/format"
+	"maunium.net/go/mautrix/event"
 	"mellium.im/xmpp/jid"
 	"mellium.im/xmpp/stanza"
 
@@ -97,10 +96,11 @@ func (x *xmppClient) handleMatrixEdit(ctx context.Context, msg *bridgev2.MatrixE
 	if meta != nil && meta.Media {
 		return fail(errEditMedia)
 	}
-	body := msg.Content.Body
+	// Never send HTML as the XMPP body: derive plain text from the formatted body instead; mentions of
+	// bridged users use their XMPP names.
+	body := rewriteMentions(msg.Content.Body, msg.Content.FormattedBody, msg.Content.Format == event.FormatHTML, x.mentionResolver(ctx, msg.Portal))
 	if body == "" && msg.Content.FormattedBody != "" {
-		// Never send HTML as the XMPP body: derive plain text from the formatted body instead.
-		body = strings.TrimSpace(format.HTMLToText(msg.Content.FormattedBody))
+		body = plainFromFormattedBody(msg.Content.FormattedBody)
 	}
 	if body == "" {
 		return fail(errEditNoText)

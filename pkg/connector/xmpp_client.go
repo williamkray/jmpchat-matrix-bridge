@@ -26,6 +26,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/format"
+	"maunium.net/go/mautrix/id"
 	"mellium.im/xmlstream"
 	"mellium.im/xmpp"
 	"mellium.im/xmpp/disco"
@@ -46,11 +47,13 @@ var (
 )
 
 type xmppClient struct {
-	loginID networkid.UserLoginID
-	meta    *JabberLoginMeta
-	log     zerolog.Logger
-	login   *bridgev2.UserLogin
-	conn    *JabberConnector
+	// parseGhostHook, when set (tests only), replaces the Matrix connector's ParseGhostMXID in mentionResolver.
+	parseGhostHook func(id.UserID) (networkid.UserID, bool)
+	loginID        networkid.UserLoginID
+	meta           *JabberLoginMeta
+	log            zerolog.Logger
+	login          *bridgev2.UserLogin
+	conn           *JabberConnector
 	// queueHook, when set (tests only), receives remote events instead of the bridgev2 queue.
 	queueHook func(bridgev2.RemoteEvent) bridgev2.EventHandlingResult
 	// noticeHook, when set (tests only), receives portal notices instead of the bridge bot.
@@ -2087,10 +2090,10 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		Bool("has_file", msg.Content.File != nil).
 		Msg("DEBUG: HandleMatrixMessage - initial Matrix content values")
 
-	body := msg.Content.Body
+	// Mentions of bridged users are rewritten to their XMPP names; an HTML-only event still yields plain text.
+	body := rewriteMentions(msg.Content.Body, msg.Content.FormattedBody, msg.Content.Format == event.FormatHTML, x.mentionResolver(ctx, msg.Portal))
 	if body == "" && msg.Content.FormattedBody != "" {
 		body = plainFromFormattedBody(msg.Content.FormattedBody)
-		log.Debug().Msg("DEBUG: Using FormattedBody (converted to text) instead of Body")
 	}
 
 	log.Debug().
