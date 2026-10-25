@@ -42,13 +42,15 @@ func TestInboundMessageIDOrder(t *testing.T) {
 		t.Errorf("id attr must win, got %q", got)
 	}
 	full.idAttr = ""
-	if got := inboundMessageID(full); got != "O" {
-		t.Errorf("origin-id (raw) next, got %q", got)
+	if got := inboundMessageID(full); got != "xmp:sid:me@example.com:S" {
+		t.Errorf("trusted stanza-id next (before the sender-chosen origin-id), got %q", got)
+	}
+	noSID := full
+	noSID.stanzaID = ""
+	if got := inboundMessageID(noSID); got != "O" {
+		t.Errorf("origin-id (raw) after the stanza-id, got %q", got)
 	}
 	full.originID = ""
-	if got := inboundMessageID(full); got != "xmp:sid:me@example.com:S" {
-		t.Errorf("stanza-id next, got %q", got)
-	}
 	upper := full
 	upper.scope = "Me@Example.com"
 	if inboundMessageID(upper) != inboundMessageID(full) {
@@ -285,8 +287,8 @@ func TestBridgedDuplicate(t *testing.T) {
 	}{
 		{"stanza-id same sender", pa, with(func(c *dupCandidate) { c.stanzaID = "S1" }), "row-sid"},
 		{"stanza-id other sender", pa, with(func(c *dupCandidate) { c.stanzaID = "S1"; c.sender = "room@muc.example.com/eve" }), ""},
-		{"origin-id alias", pa, with(func(c *dupCandidate) { c.originID = "O1" }), "row-orig"},
-		{"origin-id as row id", pa, with(func(c *dupCandidate) { c.originID = "O2" }), "O2"},
+		{"contact origin-id alias is kept (sender-chosen)", pa, with(func(c *dupCandidate) { c.originID = "O1" }), ""},
+		{"contact origin-id as row id is kept (sender-chosen)", pa, with(func(c *dupCandidate) { c.originID = "O2" }), ""},
 		{"from me vs matrix row by id attr", pa, with(func(c *dupCandidate) {
 			c.idAttr = "gen-1"
 			c.sender = "me@example.com"
@@ -306,6 +308,17 @@ func TestBridgedDuplicate(t *testing.T) {
 		{"other portal", pb, with(func(c *dupCandidate) { c.stanzaID = "S1" }), ""},
 		{"own id never counts", pa, with(func(c *dupCandidate) { c.id = "row-sid"; c.stanzaID = "S1" }), ""},
 		{"older than window", pa, with(func(c *dupCandidate) { c.stanzaID = "SOLD" }), ""},
+		// A sender that reuses origin-ids (constant, restarted counter, one SMS split into several
+		// stanzas) must not lose a distinct message that has its own id attribute.
+		{"contact with id attr, reused origin-id", pa, with(func(c *dupCandidate) { c.id, c.idAttr, c.originID = "A2", "A2", "O1" }), ""},
+		{"contact with id attr, origin-id equals a row id", pa, with(func(c *dupCandidate) { c.id, c.idAttr, c.originID = "A3", "A3", "O2" }), ""},
+		{"contact id attr equals another row's origin-id", pa, with(func(c *dupCandidate) { c.id, c.idAttr = "O1", "O1" }), ""},
+		{"contact with id attr, trusted stanza-id still matches", pa, with(func(c *dupCandidate) { c.id, c.idAttr, c.stanzaID = "A4", "A4", "S1" }), "row-sid"},
+		{"from me with id attr, origin-id vs matrix row", pa, with(func(c *dupCandidate) {
+			c.id, c.idAttr, c.originID = "gen-1", "gen-1", "gen-1"
+			c.sender = "me@example.com"
+			c.fromMe = true
+		}), "matrix:$m"},
 	} {
 		got, err := bridgedDuplicate(ctx, db, tc.portal, tc.c)
 		if err != nil || got != tc.want {
@@ -389,6 +402,21 @@ func TestFoldedCorrectionKeyIDLessOriginal(t *testing.T) {
 	x.loginID = retractTestLogin
 	if got := x.mamItemMessageID(orig); string(got) != want {
 		t.Errorf("FetchMessages id = %q, want %q", got, want)
+	}
+}
+
+// TestIDLessDMDelayNoHash: two distinct id-less 1:1 messages with the same text and the same
+// (second-resolution) delay stamp keep separate rows; only groupchat history uses the delay hash.
+func TestIDLessDMDelayNoHash(t *testing.T) {
+	const msg = `<message type="chat" from="bob@example.com/p"><body>ok</body><delay xmlns="urn:xmpp:delay" from="example.com" stamp="2026-01-01T00:00:00Z"/></message>`
+	var ids []networkid.MessageID
+	for range 2 {
+		x, got := msgHookClient()
+		runHandler(t, x, msg)
+		ids = append(ids, onlyMessage(t, got).id)
+	}
+	if !strings.HasPrefix(string(ids[0]), randIDPrefix) || ids[0] == ids[1] {
+		t.Errorf("ids = %v, want two distinct random ids", ids)
 	}
 }
 

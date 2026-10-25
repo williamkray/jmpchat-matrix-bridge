@@ -38,17 +38,18 @@ type inboundIDs struct {
 }
 
 // inboundMessageID picks the bridgev2 message id of an inbound message: the `id` attribute (unchanged
-// for backward compatibility), else the origin-id (raw), else the trusted stanza-id scoped by its
-// assigner, else a hash of the stable data of a trusted-delay message (so repeated history replays
+// for backward compatibility), else the trusted stanza-id scoped by its assigner (assigned by our server
+// or the room, so a sender reusing origin-ids cannot make bridgev2's id check drop a distinct message),
+// else the origin-id (raw), else a hash of the stable data of a trusted-delay message (so repeated history replays
 // map to one row), else a random unique id. Generated ids keep the "xmp:" prefix.
 func inboundMessageID(in inboundIDs) networkid.MessageID {
 	switch {
 	case in.idAttr != "":
 		return networkid.MessageID(in.idAttr)
-	case in.originID != "":
-		return networkid.MessageID(in.originID)
 	case in.stanzaID != "" && in.scope != "":
 		return networkid.MessageID(sidIDPrefix + strings.ToLower(in.scope) + ":" + in.stanzaID)
+	case in.originID != "":
+		return networkid.MessageID(in.originID)
 	case !in.delay.IsZero():
 		h := sha256.New()
 		for _, part := range []string{strings.ToLower(in.scope), strings.ToLower(in.senderFull), in.delay.UTC().Format(time.RFC3339Nano), in.body, in.oob} {
@@ -133,10 +134,10 @@ type dupCandidate struct {
 
 // bridgedDuplicate reports the id of a row of the same portal, with an id different from the
 // candidate's, from the same sender, that is the same XMPP message arriving through another path
-// (live, carbon, MAM, MUC history): trusted stanza-id against stanza_id, then the origin-id against
-// origin_id/xmpp_message_id and as a direct row id, then the `id` attribute against
-// origin_id/xmpp_message_id (Matrix-originated rows). Every step is sender-restricted, so a sender can
-// only suppress its own messages. "" when none. DB access: portal event loop or goroutines only.
+// (live, carbon, MAM, MUC history): trusted stanza-id against stanza_id, then (id-less or from-me
+// candidates only) the origin-id against origin_id/xmpp_message_id and as a direct row id, then
+// (from-me only) the `id` attribute against origin_id/xmpp_message_id (Matrix-originated rows). Every
+// step is sender-restricted, so a sender can only suppress its own messages. "" when none. DB access: portal event loop or goroutines only.
 func bridgedDuplicate(ctx context.Context, db *database.Database, portal networkid.PortalKey, c dupCandidate) (networkid.MessageID, error) {
 	if db == nil {
 		return "", nil
@@ -168,6 +169,16 @@ func bridgedDuplicate(ctx context.Context, db *database.Database, portal network
 	if id, err := check([]string{metaKeyStanzaID}, c.stanzaID); id != "" || err != nil {
 		return id, err
 	}
+	// Origin-id and id-attribute matches are sender-chosen evidence. A message from someone else that
+	// carries an `id` attribute has that same id in every copy (live, carbon, MAM, history), so
+	// bridgev2's own id check already drops its copies; matching its origin-id against other rows would
+	// only drop distinct messages of a sender that reuses origin-ids (constant or restarted counters, a
+	// gateway splitting one SMS/MMS into several stanzas). An id-less message from someone else is named
+	// by its trusted stanza-id when it has one (inboundMessageID), so its copies match by id as well. So
+	// both sender-chosen steps run only for our own messages (Matrix-originated rows, other clients).
+	if !c.fromMe {
+		return "", nil
+	}
 	if id, err := check([]string{metaKeyOriginID, metaKeyXMPPID}, c.originID); id != "" || err != nil {
 		return id, err
 	}
@@ -179,7 +190,7 @@ func bridgedDuplicate(ctx context.Context, db *database.Database, portal network
 			return networkid.MessageID(c.originID), nil
 		}
 	}
-	if c.idAttr != c.originID {
+	if c.fromMe && c.idAttr != c.originID {
 		return check([]string{metaKeyOriginID, metaKeyXMPPID}, c.idAttr)
 	}
 	return "", nil

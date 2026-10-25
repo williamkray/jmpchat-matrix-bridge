@@ -202,8 +202,8 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 		ts = now
 	}
 	msgID := inboundMessageID(inboundIDs{
+		// No delay hash for 1:1 (see handleMessageWithOOB): random id when nothing stable exists.
 		idAttr: id, originID: ids.OriginID, stanzaID: ids.stanzaIDBy(string(x.loginID)), scope: x.ownScope(),
-		delay: delay, senderFull: from, body: body,
 	})
 	sender := x.makeEventSender(string(x.loginID)) // "from me" for puppeting
 	x.maybeTriggerBackfillOnNewPortal(ctx, portalKey)
@@ -311,8 +311,8 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 		ts = now
 	}
 	msgID := inboundMessageID(inboundIDs{
+		// No delay hash for 1:1 (see handleMessageWithOOB): random id when nothing stable exists.
 		idAttr: id, originID: ids.OriginID, stanzaID: ids.stanzaIDBy(string(x.loginID)), scope: x.ownScope(),
-		delay: delay, senderFull: from, body: body,
 	})
 	sender := x.makeEventSender(fromBare)
 	x.maybeTriggerBackfillOnNewPortal(ctx, portalKey)

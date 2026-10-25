@@ -408,7 +408,8 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		return nil
 	}
 	// Event time and id (computed before the group-MMS body rewrite below): a trusted XEP-0203 stamp
-	// (offline storage, transport) is the message time; an id-less message gets a deterministic id.
+	// (offline storage, transport) is the message time; an id-less message is named by its origin-id
+	// or archive id.
 	now := time.Now()
 	delay := trustedDelay(ids.Extras, now, dmDelayTrust(x.ownScope(), fromBare))
 	ts := delay
@@ -417,8 +418,10 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 	}
 	idAttr := attrValue(start.Attr, "id")
 	msgID := string(inboundMessageID(inboundIDs{
+		// No delay hash for 1:1: the MAM copy is named by the archive id, so a hash could never match
+		// it, and a transport that stamps every message (second resolution) would collapse two equal
+		// texts sent in the same second into one row (the second would be dropped).
 		idAttr: idAttr, originID: ids.OriginID, stanzaID: ids.stanzaIDBy(string(x.loginID)), scope: x.ownScope(),
-		delay: delay, senderFull: from, body: body, oob: oobURL,
 	}))
 	if idAttr == "" {
 		// Residual case R1 diagnostic (content-free): does a server that omits ids still stamp them?
