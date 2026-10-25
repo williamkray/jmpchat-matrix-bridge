@@ -31,6 +31,8 @@ func (k photoKind) String() string {
 // presenceInfo is the result of one token pass over a presence stanza (see parsePresence).
 type presenceInfo struct {
 	conflict       bool      // 409 / <conflict/> error (nick conflict on join)
+	errType        string    // type attribute of the <error> child (cancel, wait, auth, modify), never its text
+	errCondition   string    // first stanza-error condition (RFC 6120 namespace, not <text>) inside <error>
 	isMUC          bool      // a muc#user element was seen
 	sawVCardUpdate bool      // a vcard-temp:x:update element was seen
 	rawPhoto       string    // trimmed text of <photo> (1:1 path input, unchanged behaviour)
@@ -55,6 +57,7 @@ func parsePresence(t tokenReader) presenceInfo {
 	var inVCardUpdate, inPhoto, sawPhotoElem bool
 	var photoText strings.Builder
 	depth := 1
+	inError := false // inside the <error> direct child of the presence
 	for depth > 0 {
 		tok, err := t.Token()
 		if err != nil {
@@ -63,6 +66,13 @@ func parsePresence(t tokenReader) presenceInfo {
 		switch v := tok.(type) {
 		case xml.StartElement:
 			depth++
+			if depth == 3 && inError && v.Name.Space == stanzaErrorNS && v.Name.Local != "text" && info.errCondition == "" {
+				info.errCondition = v.Name.Local
+			}
+			if depth == 2 && v.Name.Local == "error" {
+				inError = true
+				info.errType = attrValue(v.Attr, "type")
+			}
 			if v.Name.Local == "error" {
 				for _, a := range v.Attr {
 					if a.Name.Local == "code" && a.Value == "409" {
@@ -112,6 +122,9 @@ func parsePresence(t tokenReader) presenceInfo {
 				photoText.Write(v)
 			}
 		case xml.EndElement:
+			if depth == 2 && v.Name.Local == "error" {
+				inError = false
+			}
 			depth--
 			if v.Name.Local == "photo" {
 				inPhoto = false

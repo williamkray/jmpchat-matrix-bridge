@@ -92,8 +92,11 @@ type xmppClient struct {
 	mucJoinTracks map[string]*mucJoinTrack
 	// mucJoinGen counts sessions for join state (bumped by resetMUCJoinState); guarded by mucPendingJoinMu.
 	mucJoinGen uint64
-	mu         sync.Mutex
-	session    *xmpp.Session
+	// mucJoinWant: rooms this session sent a join for and still wants to be in until confirmed
+	// (muc_join_health.go); guarded by mucPendingJoinMu.
+	mucJoinWant map[string]*mucJoinWant
+	mu          sync.Mutex
+	session     *xmpp.Session
 	// Connection health (xmpp_conn_health.go). authFailed is set after a final SASL failure and only
 	// cleared by a new client (re-login); authFailures/authCond are guarded by mu.
 	authFailed      atomic.Bool
@@ -303,6 +306,8 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	go x.runBookmarkEventWorker(sessCtx, x.bm.eventChan())
 	// XEP-0199 keepalive: detects a dead connection long before TCP keepalive does.
 	go x.runKeepalive(sessCtx, sess, origin.Domain())
+	// Join confirmation watchdog and XEP-0410 self-ping of joined rooms (muc_join_health.go).
+	go x.runMUCJoinHealth(sessCtx)
 }
 
 // endSessionLocked cancels the current session's background goroutine context. Requires x.mu held.
@@ -1759,8 +1764,13 @@ func (x *xmppClient) joinMUCNick(ctx context.Context, roomJIDStr string, hist *m
 	}
 	// Track pending join so presence handler can store our occupant JID (and detect 409).
 	x.startMUCJoinTrack(roomJIDStr, base, nick, hist, writeBookmark)
+	// Watchdog entry before the send, so a fast answer on the Serve goroutine always finds it.
+	created := x.noteMUCJoinSent(roomJIDStr, nickOverride, writeBookmark, time.Now())
 	if err := x.sendMUCJoin(ctx, roomJIDStr, nick, hist); err != nil {
 		x.dropMUCJoinTrack(roomJIDStr)
+		if created {
+			x.dropMUCJoinWant(roomJIDStr)
+		}
 		return err
 	}
 	x.logFor(ctx).Info().
@@ -1888,6 +1898,7 @@ func (x *xmppClient) leaveMUC(ctx context.Context, roomJIDStr string) error {
 	x.mucOurOccupantJIDMu.Unlock()
 	// A join still pending must not record an occupant JID (or write a bookmark) after this leave.
 	x.dropMUCJoinTrack(roomJIDStr)
+	x.dropMUCJoinWant(roomJIDStr)
 	x.mucAv.clearRoom(roomJID.Bare().String())
 	x.logFor(ctx).Info().
 		Str("room", roomJIDStr).

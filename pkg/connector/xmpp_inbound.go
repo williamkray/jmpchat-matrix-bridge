@@ -979,9 +979,13 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 	}
 
 	if typeVal == "error" {
-		if !hasConflict && ourNick != "" {
-			// An error bounced from our own occupant JID: the room no longer has us (memory only).
-			x.noteOwnMUCExit(roomBare, fromJID.String(), info, "presence error")
+		if !hasConflict {
+			if ourNick != "" {
+				// An error bounced from our own occupant JID: the room no longer has us (memory only).
+				x.noteOwnMUCExit(roomBare, fromJID.String(), info, "presence error")
+			}
+			// A refusal of a join in flight is logged and retried or reported (muc_join_health.go).
+			x.onMUCJoinError(roomBare, ourNick, info.errType, info.errCondition)
 		}
 		if hasConflict {
 			// State change only; the retry send and notices run in a goroutine with its own span.
@@ -1028,6 +1032,7 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 		x.mucOurOccupantJID[roomBare] = fromJID.String()
 		x.mucOurOccupantJIDMu.Unlock()
 		delete(x.mucPendingJoin, roomBare)
+		x.noteMUCJoinConfirmedLocked(roomBare)
 		x.log.Debug().Str("room", roomBare).Str("occupant_jid", fromJID.String()).Msg("MUC join confirmed, stored our occupant JID")
 		// Confirmed with an alternative nick after a 409: remember it and tell the user (goroutine).
 		if track := x.takeMUCJoinTrackLocked(roomBare); track != nil {

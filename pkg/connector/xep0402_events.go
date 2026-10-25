@@ -92,12 +92,13 @@ func (x *xmppClient) applyBookmarkChange(ctx context.Context, ch bookmarkChange)
 	return x.remoteJoin(ctx, key)
 }
 
-// mucJoinInFlight reports whether a join for the room is pending (sent, not yet confirmed).
+// mucJoinInFlight reports whether a join for the room is pending (sent, not yet confirmed) or still
+// wanted by the join watchdog (e.g. after a transient join error; muc_join_health.go).
 func (x *xmppClient) mucJoinInFlight(room string) bool {
 	x.mucPendingJoinMu.Lock()
 	defer x.mucPendingJoinMu.Unlock()
 	_, ok := x.mucPendingJoin[room]
-	return ok
+	return ok || x.mucJoinWant[room] != nil
 }
 
 // remoteLeave honors a bookmark turned off (or deleted) on another client. A room we are not in and have

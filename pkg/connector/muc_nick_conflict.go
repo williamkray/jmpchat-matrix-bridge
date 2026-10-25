@@ -113,6 +113,7 @@ func (x *xmppClient) resetMUCJoinState() {
 	x.mucPendingJoinMu.Lock()
 	x.mucPendingJoin = nil
 	x.mucJoinTracks = nil
+	x.mucJoinWant = nil
 	x.mucJoinGen++
 	x.mucPendingJoinMu.Unlock()
 	// A new c2s session is in no room: the occupant JIDs of the previous session are stale (the rooms
@@ -211,6 +212,7 @@ func (x *xmppClient) continueMUCJoinAfterConflict(roomBare, next string, tried [
 		return
 	}
 	if next == "" {
+		x.dropMUCJoinWant(roomBare) // every nick refused: the watchdog must not keep retrying
 		log.Warn().Str("room", roomBare).Strs("tried", tried).Msg("MUC join failed: all nicks taken")
 		x.notifyMUC(ctx, roomBare, mucAllTakenNotice(x.mucCmdPrefix(), roomBare, tried))
 		return
