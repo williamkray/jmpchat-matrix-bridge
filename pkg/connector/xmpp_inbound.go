@@ -298,8 +298,13 @@ func startReceiveSpan(kind, msgType, from, peer, stanzaID string, hasOOB, hasRep
 }
 
 // ensureMUCGhostTraced runs ensureMUCGhostDisplayName under a 5s timeout derived from ctx, in a
-// bridge.ensure_muc_ghost span when ctx carries a trace.
+// bridge.ensure_muc_ghost span when ctx carries a trace. It does DB and Matrix HTTP work, so it is
+// only called from the portal event loop (jabberRemoteMessage.PreHandle), never on Serve.
 func (x *xmppClient) ensureMUCGhostTraced(ctx context.Context, occupantFull string) {
+	if x.ensureMUCGhostHook != nil {
+		x.ensureMUCGhostHook(ctx, occupantFull)
+		return
+	}
 	ctx, span := telemetry.StartChild(ctx, "bridge.ensure_muc_ghost")
 	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -692,11 +697,9 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 		Receiver: x.loginID,
 	}
 	x.addPortalIDForMAMCatchUp(string(portalKey.ID))
-	// Ensure MUC ghost has display name set to nick (not full JID) before queueing.
+	// The ghost lookup/display name (DB + Matrix HTTP) must not run here on the Serve goroutine; it
+	// runs in the portal event loop from jabberRemoteMessage.PreHandle.
 	sender := x.mucMessageSender(roomJID, occupantFull)
-	if !fromMe {
-		x.ensureMUCGhostTraced(ctx, occupantFull)
-	}
 
 	// Body-style reaction (parseBodyReaction) is not used here; we only have XEP-0444 from parseMessageBodyAndOOB.
 	// If the client sent body-style (id🤔> quote), body will be non-empty and reactionTarget empty; check for that.
@@ -950,8 +953,6 @@ func (x *xmppClient) handleIncomingGroupchat(msg stanza.Message, rw xmlstream.To
 	if x.handleOwnMUCEcho(roomJID, occupantFull, msg.ID, messageIDs{}) {
 		return nil
 	}
-	fromMe := x.isOwnMUCOccupant(roomJID, occupantFull)
-
 	x.log.Info().
 		Str("room", roomJID).
 		Str("occupant", occupantFull).
@@ -964,10 +965,6 @@ func (x *xmppClient) handleIncomingGroupchat(msg stanza.Message, rw xmlstream.To
 		Receiver: x.loginID,
 	}
 	x.addPortalIDForMAMCatchUp(string(portalKey.ID))
-	// Ensure MUC ghost has display name set to nick (not full JID) before queueing.
-	if !fromMe {
-		x.ensureMUCGhostTraced(context.Background(), occupantFull)
-	}
 	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
 	msgID := inboundMessageID(inboundIDs{idAttr: msg.ID})
 	sender := x.mucMessageSender(roomJID, occupantFull)
@@ -1147,6 +1144,7 @@ var (
 	_ bridgev2.RemoteReaction                 = (*jabberRemoteMessage)(nil)
 	_ bridgev2.RemoteReactionRemove           = (*jabberRemoteMessage)(nil)
 	_ bridgev2.RemoteEventWithContextMutation = (*jabberRemoteMessage)(nil)
+	_ bridgev2.RemotePreHandler               = (*jabberRemoteMessage)(nil)
 	_ bridgev2.RemotePostHandler              = (*jabberRemoteMessage)(nil)
 	_ bridgev2.RemoteEventWithTimestamp       = (*jabberRemoteMessage)(nil)
 )
@@ -1253,6 +1251,22 @@ func (m *jabberRemoteMessage) AddLogContext(c zerolog.Context) zerolog.Context {
 // MutateContext starts the remote-event handling span (no-op without a span context).
 func (m *jabberRemoteMessage) MutateContext(ctx context.Context) context.Context {
 	return telemetry.StartRemoteEvent(ctx, m.spanCtx)
+}
+
+// PreHandle runs in the portal event loop (bridgev2 handleRemoteEvent, after portal creation and
+// before the sender intent is resolved and before ConvertMessage or the reaction handling), so the
+// MUC ghost lookup, nick display name and avatar-worker note happen off the Serve goroutine and
+// cover messages and reactions alike. Only live groupchat events from another occupant qualify
+// (our own occupant maps to the login sender, which has no '/'; MAM/backfill events are skipped).
+func (m *jabberRemoteMessage) PreHandle(ctx context.Context, _ *bridgev2.Portal) {
+	if m.x == nil || !m.groupchat || m.sender.IsFromMe || m.backfillSource != "" {
+		return
+	}
+	occ := string(m.sender.Sender)
+	if !strings.Contains(occ, "/") {
+		return
+	}
+	m.x.ensureMUCGhostTraced(ctx, occ)
 }
 
 // PostHandle ends the span started in MutateContext.

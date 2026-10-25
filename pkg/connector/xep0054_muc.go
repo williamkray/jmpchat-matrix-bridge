@@ -1276,7 +1276,8 @@ func (x *xmppClient) propagateContactAvatar(bareJID string, mxc *mucMXC) {
 	x.mucAv.propagateContact(bareJID, mxc)
 }
 
-// noteMUCGhost is called (Serve, memory only) once ensureMUCGhostDisplayName holds the ghost.
+// noteMUCGhost is called from the portal event loop (memory only; the table mutex makes it safe next
+// to the Serve and worker goroutines) once ensureMUCGhostDisplayName holds the ghost.
 func (x *xmppClient) noteMUCGhost(occupantFull string) {
 	if x.mucAv.noteGhost(occupantFull) {
 		x.log.Debug().Int("cap", mucOccupantCap).Msg("MUC avatar occupant table full, ignoring new occupants this session")

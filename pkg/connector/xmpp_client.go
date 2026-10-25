@@ -56,6 +56,8 @@ type xmppClient struct {
 	log             zerolog.Logger
 	login           *bridgev2.UserLogin
 	conn            *JabberConnector
+	// ensureMUCGhostHook, when set (tests only), replaces the MUC ghost lookup run from PreHandle.
+	ensureMUCGhostHook func(ctx context.Context, occupant string)
 	// queueHook, when set (tests only), receives remote events instead of the bridgev2 queue.
 	queueHook func(bridgev2.RemoteEvent) bridgev2.EventHandlingResult
 	// noticeHook, when set (tests only), receives portal notices instead of the bridge bot.
@@ -1445,7 +1447,9 @@ func (x *xmppClient) withAppServiceIDSuffix(name string) string {
 }
 
 // ensureMUCGhostDisplayName ensures the ghost for the given MUC occupant (room@conf/nick) has the correct display name (nick).
-// Call before queueing a MUC message so Matrix shows the short nick instead of the full JID.
+// Runs in the portal event loop (jabberRemoteMessage.PreHandle), before bridgev2 resolves the sender
+// intent; never on the Serve goroutine. bridgev2's own UpdateInfoIfNecessary (GetUserInfo) names new
+// ghosts too, so this mainly refreshes a changed nick and notes the occupant for the avatar worker.
 func (x *xmppClient) ensureMUCGhostDisplayName(ctx context.Context, occupantFull string) {
 	log := x.logFor(ctx)
 	if x.conn == nil || x.conn.br == nil || occupantFull == "" || !strings.Contains(occupantFull, "/") {
@@ -1465,8 +1469,11 @@ func (x *xmppClient) ensureMUCGhostDisplayName(ctx context.Context, occupantFull
 	if err != nil || info == nil || info.Name == nil {
 		return
 	}
+	oldName := ghost.Name
 	ghost.UpdateInfo(ctx, info)
-	log.Info().Str("occupant", occupantFull).Str("display_name", *info.Name).Msg("Updated MUC ghost display name")
+	if ghost.Name != oldName {
+		log.Info().Str("occupant", occupantFull).Str("display_name", ghost.Name).Msg("Updated MUC ghost display name")
+	}
 }
 
 func (x *xmppClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
