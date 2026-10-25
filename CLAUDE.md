@@ -200,6 +200,8 @@ docker run --rm williamkray/jmpchat-matrix-bridge > config.yaml   # get example 
 
 See `README.md` for full Docker usage with registration generation and volume mounts.
 
+Releases: pushing a `v*` git tag runs `.github/workflows/release-image.yml` (tests with `-tags goolm`, then builds linux/amd64 with the same build args as `build-args.sh` and pushes `ghcr.io/williamkray/jmpchat-matrix-bridge:<tag>`, `:vX.Y` and `:latest`; pre-releases with a `-` only get their own tag). `workflow_dispatch` with an existing tag rebuilds it (e.g. after a base image security fix). Actions are pinned to commit SHAs. Docker Hub `:dev` test images are still pushed by hand.
+
 ## Key Dependencies
 
 - Go 1.26+ (per `go.mod`)

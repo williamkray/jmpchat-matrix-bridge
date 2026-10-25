@@ -240,7 +240,16 @@ For more details, see [End-to-bridge encryption](https://docs.mau.fi/bridges/gen
 
 A read-only config (for example a mounted Secret) works: the bridge notices that it cannot rewrite the file and starts with `--no-update`. A missing config file gives a clear error and exit code 10.
 
-Build the image:
+Release images are published to the GitHub Container Registry for every release tag:
+
+```bash
+docker pull ghcr.io/williamkray/jmpchat-matrix-bridge:latest   # newest release
+docker pull ghcr.io/williamkray/jmpchat-matrix-bridge:v0.11.0  # an exact release (or :v0.11 for the newest patch)
+```
+
+Pre-release tags (`v1.2.3-rc1`) are pushed under their own tag only and never move `latest` or `vX.Y`.
+
+Or build the image yourself:
 
 ```bash
 docker build $(./build-args.sh) -t jmpchat-matrix-bridge .

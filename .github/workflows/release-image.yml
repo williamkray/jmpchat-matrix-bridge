@@ -1,0 +1,92 @@
+# Builds the Docker image for a release tag (v*) and pushes it to the GitHub Container Registry:
+#   ghcr.io/williamkray/jmpchat-matrix-bridge:v0.11.0, :v0.11 and :latest (not for pre-releases like v0.11.0-rc1).
+# Tags always keep the v prefix (matching the git tags). Tests run first; a failing test pushes nothing.
+# Third-party actions are pinned to commit SHAs (version in the comment).
+name: Release image
+
+on:
+  push:
+    tags: ["v*"]
+  # Rebuild an existing tag by hand (e.g. after a base image security update).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)build, e.g. v0.11.0"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-image-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Same patched toolchain as the Dockerfile builder stage.
+          go-version: "1.27.3"
+      - name: Test
+        run: go test -tags goolm ./...
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      - name: Check the tag format
+        run: |
+          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::release tag must look like v1.2.3 or v1.2.3-rc1, got $RELEASE_TAG"
+            exit 1
+          fi
+      - name: Build metadata
+        id: build
+        # Same values build-args.sh passes for local builds.
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ env.RELEASE_TAG }}
+            type=semver,pattern=v{{major}}.{{minor}},value=${{ env.RELEASE_TAG }},enable=${{ !contains(env.RELEASE_TAG, '-') }}
+            type=raw,value=latest,enable=${{ !contains(env.RELEASE_TAG, '-') }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_COMMIT=${{ steps.build.outputs.commit }}
+            GIT_TAG=${{ env.RELEASE_TAG }}
+            GIT_REPOSITORY_URL=${{ github.server_url }}/${{ github.repository }}
+            BUILD_TIME=${{ steps.build.outputs.time }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
