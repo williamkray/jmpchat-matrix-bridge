@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/event"
@@ -270,6 +271,12 @@ func (x *xmppClient) actOnMUCInvite(inv mucInvite) {
 		return
 	}
 	if portal == nil || portal.MXID == "" {
+		// Only a real room gets a portal: a direct invite can name any JID, and a portal created under a
+		// contact's bare JID would take over that contact's DM portal key (as an invite-pending MUC).
+		if (portal != nil && portal.RoomType == database.RoomTypeDM) || !x.isMUC(ctx, inv.room) {
+			log.Debug().Str("room", inv.room).Msg("MUC invite: the invited JID is not a room; invite dropped")
+			return
+		}
 		x.queueInviteResync(ctx, inv, true, inviteText(inv, "Accept the invite to join; the bridge joins the XMPP room then."))
 		return
 	}
@@ -328,6 +335,9 @@ func markInvitePending(meta *PortalMetadata) bool {
 // post-handler, once the room exists.
 func (x *xmppClient) queueInviteResync(ctx context.Context, inv mucInvite, create bool, notice string) {
 	room := inv.room
+	// stale: the room was joined between this invite and the resync (accept, join command, bookmark).
+	// GetChatInfoFunc and PostHandleFunc both run in the portal event loop, one after the other.
+	stale := false
 	x.queueRemoteEvent(ctx, &simplevent.ChatResync{
 		EventMeta: simplevent.EventMeta{
 			Type:         bridgev2.RemoteEventChatResync,
@@ -335,6 +345,9 @@ func (x *xmppClient) queueInviteResync(ctx context.Context, inv mucInvite, creat
 			CreatePortal: create,
 			PostHandleFunc: func(ctx context.Context, portal *bridgev2.Portal) {
 				defer telemetry.EndRemoteEvent(ctx)
+				if stale {
+					return
+				}
 				var mxid id.RoomID
 				if portal != nil {
 					mxid = portal.MXID
@@ -343,6 +356,13 @@ func (x *xmppClient) queueInviteResync(ctx context.Context, inv mucInvite, creat
 			},
 		},
 		GetChatInfoFunc: func(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
+			if portal != nil && portal.MXID != "" {
+				if meta, _ := portal.Metadata.(*PortalMetadata); meta == nil || !meta.MUCLeft {
+					// Re-checked here, serialized with the accept: never mark a joined room pending again.
+					stale = true
+					return &bridgev2.ChatInfo{}, nil
+				}
+			}
 			info := &bridgev2.ChatInfo{}
 			if create {
 				var err error
@@ -402,9 +422,11 @@ func (x *xmppClient) notifyInviteRoom(ctx context.Context, room string, mxid id.
 // HandleMatrixMembership (bridgev2.MembershipHandlingNetworkAPI) makes accepting the Matrix invite of an
 // invited MUC portal the explicit "join" intent: JoinMUC clears the left/pending flags, joins with the
 // invite password (sendMUCJoin) and writes the bookmark. Rejecting changes nothing on XMPP. Every other
-// change keeps what bridgev2 did before this interface existed (it answered ErrMembershipNotSupported;
-// own profile changes are a harmless no-op), and the bridge never leaves a MUC because the user left a
-// Matrix room.
+// change answers ErrMembershipNotSupported, which gives the same failed message status (no notice) and
+// optional state revert as before this interface existed; the only difference is one bridgev2 error log
+// line per such event (the interface cannot return "ignored"). Own joins of other portals, own profile
+// changes and rejects are a no-op success. The bridge never leaves a MUC because the user left a Matrix
+// room (with bridge_matrix_leave off, bridgev2 drops own leaves before calling this).
 func (x *xmppClient) HandleMatrixMembership(ctx context.Context, msg *bridgev2.MatrixMembershipChange) (*bridgev2.MatrixMembershipResult, error) {
 	switch msg.Type {
 	case bridgev2.AcceptInvite, bridgev2.Join:

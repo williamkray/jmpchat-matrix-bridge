@@ -502,3 +502,70 @@ func TestSanitizeInviteReason(t *testing.T) {
 		t.Errorf("sanitize = %q", got)
 	}
 }
+
+// A direct invite naming a JID that is not a room (e.g. a contact) must not create a portal: it would
+// take over that contact's DM portal key as an invite-pending MUC.
+func TestInviteToNonRoomJIDDropped(t *testing.T) {
+	r := newInviteRig()
+	r.x.mucCacheMu.Lock()
+	r.x.mucCache = map[string]bool{"alice@example.com": false}
+	r.x.mucCacheMu.Unlock()
+	runHandler(t, r.x, `<message from="bob@example.com/res"><x xmlns="jabber:x:conference" jid="alice@example.com"/></message>`)
+	if ev, n := r.settle(); ev != 0 || n != 0 {
+		t.Fatalf("events=%d notices=%d, want none for a non-room JID", ev, n)
+	}
+}
+
+// The resync queued by an invite re-checks the portal in the event loop: a room joined in the meantime
+// (accept, join command, bookmark) is neither marked pending again nor re-invited, and gets no notice.
+func TestInviteResyncStaleAfterJoin(t *testing.T) {
+	for _, create := range []bool{true, false} {
+		r := newInviteRig()
+		if !create {
+			r.addPortal("!old:example.com", &PortalMetadata{MUCLeft: true})
+			r.member, r.known = event.MembershipInvite, true
+		}
+		runHandler(t, r.x, directInvite(""))
+		r.wait(t)
+		e := r.resync(t)
+		if e.CreatePortal != create {
+			t.Fatalf("create=%v: CreatePortal=%v", create, e.CreatePortal)
+		}
+		// Accepted before the resync ran: flags cleared, room exists.
+		portal := newInvitePortal("!old:example.com", &PortalMetadata{})
+		info, err := e.GetChatInfoFunc(context.Background(), portal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Members != nil || info.ExtraUpdates != nil {
+			t.Fatalf("create=%v: stale resync still changes the room: %+v", create, info)
+		}
+		e.PostHandleFunc(context.Background(), portal)
+		if _, n := r.settle(); n != 0 {
+			t.Errorf("create=%v: stale resync posted a notice", create)
+		}
+		if meta := portal.Metadata.(*PortalMetadata); meta.MUCLeft || meta.MUCInvitePending {
+			t.Errorf("create=%v: joined portal marked again: %+v", create, meta)
+		}
+	}
+}
+
+// An accept whose XMPP join cannot be sent reports the error (failed status) and posts a notice with
+// the join command; the left/pending flags are already cleared, so the next connect re-joins.
+func TestHandleMatrixMembershipAcceptJoinFails(t *testing.T) {
+	r := newInviteRig()
+	x := r.x
+	x.mucSendJoinHook = func(string, string) error { return errors.New("not connected to XMPP") }
+	_, err := x.HandleMatrixMembership(context.Background(), membershipChange(x, bridgev2.AcceptInvite, &PortalMetadata{MUCLeft: true, MUCInvitePending: true}))
+	if err == nil {
+		t.Fatal("join failure not reported")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.notices) != 1 || !strings.Contains(r.notices[0], "join "+invRoom) {
+		t.Fatalf("notices = %q", r.notices)
+	}
+	if len(r.left) != 1 || r.left[0] {
+		t.Fatalf("left flag calls = %v, want one clear", r.left)
+	}
+}
