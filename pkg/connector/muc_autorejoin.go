@@ -197,6 +197,12 @@ func (x *xmppClient) runMUCAutoRejoin(sessCtx context.Context) {
 		}
 		if i < len(rooms) {
 			room := string(rooms[i].ID)
+			// Candidates were read once at the start of the batch: a leave issued since then wins.
+			if x.isMUCLeft(ctx, room) {
+				skipped++
+				log.Debug().Str("room", room).Msg("MUC auto-rejoin: room was left during the batch, skipped")
+				continue
+			}
 			hist := mucRejoinHistory(x.newestBridgedMessage(ctx, room), time.Now())
 			if err := x.joinMUC(ctx, room, hist); err != nil {
 				failed++

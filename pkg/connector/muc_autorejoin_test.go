@@ -224,3 +224,24 @@ func TestJoinClearsAndLeaveSetsLeftFlag(t *testing.T) {
 		t.Fatalf("manual join history = %+v", h)
 	}
 }
+
+func TestRunMUCAutoRejoinSkipsRoomLeftDuringBatch(t *testing.T) {
+	fastRejoin(t, time.Millisecond)
+	b := rejoinPortal("b@conference.example.com", database.RoomTypeGroupDM, "!b:x", false, rejoinLogin)
+	r := newRejoinRig([]*database.Portal{
+		rejoinPortal("a@conference.example.com", database.RoomTypeGroupDM, "!a:x", false, rejoinLogin),
+		b,
+	})
+	send := r.x.mucSendJoinHook
+	r.x.mucSendJoinHook = func(room, nick string) error {
+		if room == "a@conference.example.com" {
+			// The user leaves b while the batch is still on a.
+			b.Metadata = &PortalMetadata{MUCLeft: true}
+		}
+		return send(room, nick)
+	}
+	r.x.runMUCAutoRejoin(context.Background())
+	if got := r.joined(); len(got) != 1 || got[0] != "a@conference.example.com" {
+		t.Fatalf("joins = %v, want only a", got)
+	}
+}
