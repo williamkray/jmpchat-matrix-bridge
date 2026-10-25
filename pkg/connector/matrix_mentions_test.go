@@ -47,6 +47,10 @@ func TestRewriteMentions(t *testing.T) {
 		{"matrix uri", "Alice (jabber): hi", `<a href="matrix:u/jabber_room=40conf.example.com=2fAlice:example.org">Alice (jabber)</a>: hi`, true, "Alice: hi"},
 		{"name absent", "hello " + testAliceMXID, pill(testAliceMXID, "Alice (jabber)") + " hello", true, "hello Alice"},
 		{"name absent unchanged", "hello", pill(testAliceMXID, "Alice (jabber)") + " hello", true, "hello"},
+		{"edited pill text only once", "boss: ask the boss", pill(testAliceMXID, "boss") + ": ask the boss", true, "Alice: ask the boss"},
+		{"same pill twice", "boss and boss, the boss", pill(testAliceMXID, "boss") + " and " + pill(testAliceMXID, "boss") + ", the boss", true, "Alice and Alice, the boss"},
+		{"shorter name first", "Al (jabber) and Alice (jabber)", pill(testBobMXID, "Al (jabber)") + " and " + pill(testAliceMXID, "Alice (jabber)"), true, "Bob and Alice"},
+		{"non ghost does not advance", "Carol, Alice (jabber)", pill(testRealMXID, "Carol") + ", " + pill(testAliceMXID, "Alice (jabber)"), true, "Carol, Alice"},
 	}
 	for _, tc := range tests {
 		got := rewriteMentions(tc.body, tc.html, tc.isHTML, testMentionResolve)

@@ -2,7 +2,6 @@ package connector
 
 import (
 	"context"
-	"sort"
 	"strings"
 
 	"maunium.net/go/mautrix/bridgev2"
@@ -38,9 +37,9 @@ func newMentionParser(onPill func(displayname string, mxid id.UserID) string) *f
 
 // rewriteMentions makes the XMPP body of a Matrix message use the XMPP-side names of mentioned bridged
 // users instead of their Matrix display names (which carry the appservice suffix). Without HTML
-// formatting the body is returned unchanged. Otherwise each user pill that resolve knows is replaced in
-// body (display name and raw user ID); an empty body (HTML-only event) is derived from the formatted
-// body with the resolved names.
+// formatting the body is returned unchanged. Otherwise each user pill that resolve knows replaces one
+// occurrence of its display name or raw user ID in body (in pill order); an empty body (HTML-only event)
+// is derived from the formatted body with the resolved names.
 func rewriteMentions(body, formattedBody string, isHTML bool, resolve func(id.UserID) (string, bool)) string {
 	if formattedBody == "" || !isHTML {
 		return body
@@ -61,23 +60,34 @@ func rewriteMentions(body, formattedBody string, isHTML bool, resolve func(id.Us
 		return displayname
 	})
 	parser.Parse(formattedBody, ctx)
-	sort.SliceStable(pills, func(i, j int) bool { return len(pills[i].displayname) > len(pills[j].displayname) })
-	seen := map[mentionPill]bool{}
+	// Pills are replaced in document order, each at its next occurrence (display name or raw user ID)
+	// after the previous replacement, so the same text elsewhere in the body (not a pill, e.g. an edited
+	// pill text that is a common word) stays unchanged.
+	var sb strings.Builder
+	pos := 0
 	for _, p := range pills {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
 		name, ok := resolve(p.mxid)
 		if !ok || name == "" {
 			continue
 		}
-		if p.displayname != "" && p.displayname != name {
-			body = strings.ReplaceAll(body, p.displayname, name)
+		at, n := -1, 0
+		if p.displayname != "" {
+			if i := strings.Index(body[pos:], p.displayname); i >= 0 {
+				at, n = i, len(p.displayname)
+			}
 		}
-		body = strings.ReplaceAll(body, string(p.mxid), name)
+		if i := strings.Index(body[pos:], string(p.mxid)); i >= 0 && (at < 0 || i < at) {
+			at, n = i, len(p.mxid)
+		}
+		if at < 0 {
+			continue
+		}
+		sb.WriteString(body[pos : pos+at])
+		sb.WriteString(name)
+		pos += at + n
 	}
-	return body
+	sb.WriteString(body[pos:])
+	return sb.String()
 }
 
 // mentionResolver returns the resolver used by rewriteMentions for a portal: a bridged ghost user ID
