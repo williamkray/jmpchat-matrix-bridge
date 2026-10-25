@@ -36,6 +36,9 @@ type JabberConfig struct {
 	SendReadMarkers      *bool `yaml:"send_read_markers"`
 	SendDeliveryReceipts *bool `yaml:"send_delivery_receipts"`
 	MUCReadMarkers       *bool `yaml:"muc_read_markers"`
+	// MUCNickSync keeps the per-room Matrix display name and the MUC nick in sync (muc_nick_sync.go).
+	// Pointer so that a missing key means the default (true).
+	MUCNickSync *bool `yaml:"muc_nick_sync"`
 }
 
 // allowPrivateServerOverride is nil-safe (tests and stub paths have no config).
@@ -114,6 +117,34 @@ type RosterContact struct {
 type MUCJoiner interface {
 	JoinMUC(ctx context.Context, roomJID string) error
 	LeaveMUC(ctx context.Context, roomJID string) error
+}
+
+// MUCNickStatus is the immediate outcome of MUCNickChanger.SetMUCNick.
+type MUCNickStatus int
+
+const (
+	MUCNickSaved     MUCNickStatus = iota // not in the room: stored, used at the next join
+	MUCNickUnchanged                      // already the nick in the room: stored as the preferred nick
+	MUCNickChanging                       // nick-change presence sent; the result follows as a notice
+)
+
+// MUCNickChanger is implemented by the real XMPP client (muc-nick command).
+type MUCNickChanger interface {
+	SetMUCNick(ctx context.Context, roomJID, nick string) (status MUCNickStatus, current string, err error)
+}
+
+// MUCJoinStatus is the immediate outcome of the join command.
+type MUCJoinStatus int
+
+const (
+	MUCJoinSent      MUCJoinStatus = iota // join presence sent
+	MUCJoinAlreadyIn                      // already in the room under the chosen nick: nothing sent
+	MUCJoinRenaming                       // already in the room under another nick: nick change sent
+)
+
+// MUCJoinReporter is implemented by the real XMPP client (join command).
+type MUCJoinReporter interface {
+	JoinMUCStatus(ctx context.Context, roomJID string) (status MUCJoinStatus, current, want string, err error)
 }
 
 // onceWarnDebugIdentifiers ensures we only log the debug-identifiers warning once per process.
@@ -264,6 +295,11 @@ send_delivery_receipts: true
 # Read markers in group chats (MUCs): tells every occupant of the room which message you read (the same
 # as the one-to-one setting, but visible to the whole room). Set to false if you do not want that.
 muc_read_markers: true
+# Keep your nick in XMPP group chats (MUCs) and your display name in the bridged Matrix room in sync,
+# both ways. Setting a display name for one bridged room (for example /myroomnick) changes your nick
+# in that XMPP room; a nick change on XMPP (another client, a taken nick) updates your display name in
+# that Matrix room (needs double puppeting). Your global Matrix display name is never sent to XMPP.
+muc_nick_sync: true
 `
 	e := c.extension()
 	if e != nil {
@@ -278,6 +314,7 @@ muc_read_markers: true
 		helper.Copy(configupgrade.Bool, "send_read_markers")
 		helper.Copy(configupgrade.Bool, "send_delivery_receipts")
 		helper.Copy(configupgrade.Bool, "muc_read_markers")
+		helper.Copy(configupgrade.Bool, "muc_nick_sync")
 		upgradeCardDAVConfig(helper)
 		if e != nil {
 			e.upgradeConfig(helper)
@@ -547,6 +584,16 @@ func SetMUCPreferredNickForRoom(ctx context.Context, br *bridgev2.Bridge, loginI
 	setExplicitMUCNick(meta, nick)
 	portal.Metadata = meta
 	return portal.Save(ctx)
+}
+
+// saveExplicitMUCNickOn stores nick as the explicit per-room nick of the portal key.
+func saveExplicitMUCNickOn(ctx context.Context, br *bridgev2.Bridge, key networkid.PortalKey, nick string) error {
+	return SetMUCPreferredNickForRoom(ctx, br, key.Receiver, string(key.ID), nick)
+}
+
+// SanitizeMUCNick is sanitizeMUCNick for the command layer.
+func SanitizeMUCNick(roomBare, raw string) (nick, reason string) {
+	return sanitizeMUCNick(roomBare, raw)
 }
 
 // SetDefaultMUCNick sets the default MUC nickname for the login and persists it in user login metadata.

@@ -288,7 +288,7 @@ func (x *xmppClient) actOnMUCInvite(inv mucInvite) {
 		x.queueInviteResync(ctx, inv, false, inviteText(inv, "Accept the invite to join; the bridge joins the XMPP room then."))
 		return
 	}
-	x.notifyInviteRoom(ctx, inv.room, portal.MXID, inviteText(inv, "Send `"+x.mucCmdPrefix()+" join "+inv.room+"` here or in the management room to rejoin."))
+	x.notifyPortalRoom(ctx, inv.room, portal.MXID, inviteText(inv, "Send `"+x.mucCmdPrefix()+" join "+inv.room+"` here or in the management room to rejoin."))
 }
 
 // inviteText words the notice posted into the portal room. tail is the instruction that closes it.
@@ -352,7 +352,7 @@ func (x *xmppClient) queueInviteResync(ctx context.Context, inv mucInvite, creat
 				if portal != nil {
 					mxid = portal.MXID
 				}
-				x.notifyInviteRoom(ctx, room, mxid, notice)
+				x.notifyPortalRoom(ctx, room, mxid, notice)
 			},
 		},
 		GetChatInfoFunc: func(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
@@ -403,8 +403,8 @@ func (x *xmppClient) userRoomMembership(ctx context.Context, mxid id.RoomID) (ev
 	return mi.Membership, true
 }
 
-// notifyInviteRoom posts an m.notice from the bridge bot into the portal room (not the management room).
-func (x *xmppClient) notifyInviteRoom(ctx context.Context, room string, mxid id.RoomID, text string) {
+// notifyPortalRoom posts an m.notice from the bridge bot into the portal room (not the management room).
+func (x *xmppClient) notifyPortalRoom(ctx context.Context, room string, mxid id.RoomID, text string) {
 	if x.mucNoticeHook != nil {
 		x.mucNoticeHook(room, text)
 		return
@@ -415,7 +415,7 @@ func (x *xmppClient) notifyInviteRoom(ctx context.Context, room string, mxid id.
 	content := format.RenderMarkdown(text, true, false)
 	content.MsgType = event.MsgNotice
 	if _, err := x.conn.br.Bot.SendMessage(ctx, mxid, event.EventMessage, &event.Content{Parsed: &content}, nil); err != nil {
-		x.logFor(ctx).Warn().Err(err).Msg("Failed to send MUC invite notice")
+		x.logFor(ctx).Warn().Err(err).Msg("Failed to send portal notice")
 	}
 }
 
@@ -442,7 +442,7 @@ func (x *xmppClient) HandleMatrixMembership(ctx context.Context, msg *bridgev2.M
 		}
 		if err := x.JoinMUC(ctx, room); err != nil {
 			x.logFor(ctx).Warn().Err(err).Str("room", room).Msg("MUC invite accepted but the XMPP join failed")
-			x.notifyInviteRoom(ctx, room, msg.Portal.MXID, "Could not join the XMPP room. Send `"+x.mucCmdPrefix()+" join "+room+"` to try again.")
+			x.notifyPortalRoom(ctx, room, msg.Portal.MXID, "Could not join the XMPP room. Send `"+x.mucCmdPrefix()+" join "+room+"` to try again.")
 			return nil, err
 		}
 		return nil, nil
@@ -453,6 +453,7 @@ func (x *xmppClient) HandleMatrixMembership(ctx context.Context, msg *bridgev2.M
 		}
 		return nil, bridgev2.ErrMembershipNotSupported
 	case bridgev2.ProfileChange:
+		x.handleOwnProfileChange(ctx, msg)
 		return nil, nil
 	}
 	return nil, bridgev2.ErrMembershipNotSupported

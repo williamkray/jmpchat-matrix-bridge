@@ -435,3 +435,38 @@ func TestCarbonIDLessUsesStanzaIDAndDelay(t *testing.T) {
 		t.Errorf("id = %q", m.id)
 	}
 }
+
+// A replay of our own message under an earlier own nick is the same message: a trusted (room-assigned)
+// stanza-id matches rows of our own account whoever the candidate's sender is; sender-chosen ids stay
+// sender-restricted.
+func TestBridgedDuplicateTrustedStanzaIDOwnRow(t *testing.T) {
+	ctx := context.Background()
+	db := realSchemaDB(t)
+	const me networkid.UserLoginID = "me@example.com"
+	pa := networkid.PortalKey{ID: "room@muc.example.com", Receiver: me}
+	if err := db.Portal.Insert(ctx, &database.Portal{PortalKey: pa, MXID: "!room:hs"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Message.Insert(ctx, &database.Message{
+		ID: "matrix:$own", MXID: "$e1", Room: pa, SenderID: "me@example.com", Timestamp: time.Now().Add(-time.Hour),
+		Metadata: &MessageMetadata{XMPPMessageID: "gen-9", OriginID: "orig-9", StanzaID: "S9"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	base := dupCandidate{id: "new", sender: "room@muc.example.com/oldnick", self: "me@example.com", ts: time.Now()}
+	c := base
+	c.stanzaID = "S9"
+	if got, err := bridgedDuplicate(ctx, db, pa, c); err != nil || got != "matrix:$own" {
+		t.Fatalf("stanza-id: got %q, %v", got, err)
+	}
+	for _, mut := range []func(*dupCandidate){
+		func(c *dupCandidate) { c.originID = "orig-9" },
+		func(c *dupCandidate) { c.idAttr = "gen-9" },
+	} {
+		c = base
+		mut(&c)
+		if got, err := bridgedDuplicate(ctx, db, pa, c); err != nil || got != "" {
+			t.Fatalf("sender-chosen id matched a row of ours: %q, %v", got, err)
+		}
+	}
+}

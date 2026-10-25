@@ -102,8 +102,26 @@ type xmppClient struct {
 	// mucJoinWant: rooms this session sent a join for and still wants to be in until confirmed
 	// (muc_join_health.go); guarded by mucPendingJoinMu.
 	mucJoinWant map[string]*mucJoinWant
-	mu          sync.Mutex
-	session     *xmpp.Session
+	// mucNickChanges: nick change in flight per room (muc_nick_change.go); guarded by mucPendingJoinMu.
+	mucNickChanges map[string]*mucNickChange
+	// mucPastOwn: occupant JIDs we held earlier this session per room (newest last, max mucPastOwnMax);
+	// guarded by mucOurOccupantJIDMu. Echo and replay matching only, never sender attribution.
+	mucPastOwn map[string][]pastOccupant
+	// mucNickChangeHook (tests only) replaces the nick-change presence send; mucExplicitSaveHook replaces
+	// the persistence of an explicit per-room nick; joinBookmarkHook replaces the join bookmark publish.
+	mucNickChangeHook   func(roomBare, nick string) error
+	mucExplicitSaveHook func(roomBare, nick string) error
+	joinBookmarkHook    func(roomBare, nick string)
+	// Matrix <-> XMPP nick sync (muc_nick_sync.go).
+	nickSync          nickSyncState
+	globalNameMu      sync.Mutex
+	globalName        string
+	globalNameAt      time.Time
+	globalProfileHook func(ctx context.Context) (string, error)
+	memberStateHook   func(room id.RoomID) (map[string]any, error)
+	memberSetHook     func(room id.RoomID, content map[string]any) error
+	mu                sync.Mutex
+	session           *xmpp.Session
 	// Connection health (xmpp_conn_health.go). authFailed is set after a final SASL failure and only
 	// cleared by a new client (re-login); authFailures/authCond are guarded by mu.
 	authFailed      atomic.Bool
@@ -554,6 +572,7 @@ func (x *xmppClient) Disconnect() {
 	}
 	hadSession := x.session != nil
 	x.sig.reset() // stops pending debounced MUC markers
+	x.nickSync.reset()
 	if hadSession {
 		_ = x.session.Close()
 		x.session = nil
@@ -1732,6 +1751,15 @@ var errMUCLeft = errors.New("room was left; use the join command to return")
 // JoinMUC is the explicit join command (MUCJoiner): it ends an earlier "leave", sends the join presence
 // and, once the join is confirmed, creates/enables the room's XEP-0402 bookmark. Nick: see chooseMUCNick.
 func (x *xmppClient) JoinMUC(ctx context.Context, roomJIDStr string) error {
+	_, _, _, err := x.JoinMUCStatus(ctx, roomJIDStr)
+	return err
+}
+
+// JoinMUCStatus is JoinMUC that also reports what was done (MUCJoinReporter). A room the bridge is
+// already in gets no join presence (it would replay history and the occupant list): under the chosen nick
+// nothing is sent, under another nick only a plain nick-change presence goes out. The bookmark is
+// (re-)enabled in both cases.
+func (x *xmppClient) JoinMUCStatus(ctx context.Context, roomJIDStr string) (MUCJoinStatus, string, string, error) {
 	ctx, span := telemetry.Start(ctx, "xmpp.muc.join", trace.WithSpanKind(trace.SpanKindProducer))
 	defer span.End()
 	if span.IsRecording() {
@@ -1740,9 +1768,21 @@ func (x *xmppClient) JoinMUC(ctx context.Context, roomJIDStr string) error {
 	if err := x.setMUCLeft(ctx, roomJIDStr, false); err != nil {
 		x.logFor(ctx).Warn().Err(err).Str("room", roomJIDStr).Msg("Failed to clear MUC left flag")
 	}
-	err := x.joinMUCOpts(ctx, roomJIDStr, nil, true)
+	occ := x.getMUCOurOccupantJID(roomJIDStr)
+	if occ == "" {
+		err := x.joinMUCOpts(ctx, roomJIDStr, nil, true)
+		telemetry.Fail(span, err)
+		return MUCJoinSent, "", "", err
+	}
+	base, want := x.mucNickChoice(ctx, roomJIDStr)
+	cur := resourceOf(occ)
+	if cur == want {
+		go x.bookmarkAfterJoin(roomJIDStr, base, cur, cur != base)
+		return MUCJoinAlreadyIn, cur, want, nil
+	}
+	err := x.startMUCNickChange(ctx, roomJIDStr, &mucNickChange{want: want, old: cur, origin: nickByJoin, writeBookmark: true, base: base})
 	telemetry.Fail(span, err)
-	return err
+	return MUCJoinRenaming, cur, want, err
 }
 
 // joinMUCForPortal makes sure we are in a bridged room when the user views it, sends into it or
@@ -1794,6 +1834,8 @@ func (x *xmppClient) joinMUCNick(ctx context.Context, roomJIDStr string, hist *m
 	if _, err := roomJID.WithResource(nick); err != nil {
 		return fmt.Errorf("MUC JID with resource: %w", err)
 	}
+	// A re-join supersedes a nick change in flight (no notice).
+	x.dropMUCNickChange(roomJIDStr)
 	// Track pending join so presence handler can store our occupant JID (and detect 409).
 	x.startMUCJoinTrack(roomJIDStr, base, nick, hist, writeBookmark)
 	// Watchdog entry before the send, so a fast answer on the Serve goroutine always finds it.
@@ -1897,6 +1939,7 @@ func (x *xmppClient) LeaveMUC(ctx context.Context, roomJIDStr string) error {
 }
 
 func (x *xmppClient) leaveMUC(ctx context.Context, roomJIDStr string) error {
+	x.dropMUCNickChange(roomJIDStr) // a nick change in flight is moot once we leave (no notice)
 	if x.mucLeaveHook != nil {
 		return x.mucLeaveHook(roomJIDStr)
 	}

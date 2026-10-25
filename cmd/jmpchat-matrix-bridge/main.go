@@ -159,7 +159,7 @@ func main() {
 			Func:          withSpan("join", cmdMUCJoin),
 			Name:          "join",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Join a multi-user chat (MUC) room. Usage: `%s join [_login JID_] <room-jid>` (e.g. room@conference.example.com)", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Join a multi-user chat (MUC) room (a room you are already in is not re-joined). Usage: `%s join [_login JID_] <room-jid>` (e.g. room@conference.example.com)", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("leave", cmdMUCLeave),
@@ -177,7 +177,7 @@ func main() {
 			Func:          withSpan("muc-nick", cmdMUCNick),
 			Name:          "muc-nick",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set preferred MUC nickname for a room. Usage: `%s muc-nick [_login JID_] <room-jid> <nick>`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set your nick for a room (changes it at once when the bridge is in the room). Usage: `%s muc-nick [_login JID_] <room-jid> <nick>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("avatar-probe", connector.CmdAvatarProbe),
@@ -352,8 +352,15 @@ func cmdMUCJoin(ce *commands.Event) {
 		ce.Reply("Not connected to Jabber. Reconnect (or wait for auto-reconnect) and try again.")
 		return
 	}
-	if err := muc.JoinMUC(ce.Ctx, roomJID); err != nil {
-		ce.Reply("Failed to join room: %v", err)
+	status, cur, want := connector.MUCJoinSent, "", ""
+	var joinErr error
+	if rep, ok := login.Client.(connector.MUCJoinReporter); ok {
+		status, cur, want, joinErr = rep.JoinMUCStatus(ce.Ctx, roomJID)
+	} else {
+		joinErr = muc.JoinMUC(ce.Ctx, roomJID)
+	}
+	if joinErr != nil {
+		ce.Reply("Failed to join room: %v", joinErr)
 		return
 	}
 	// Get or create the Matrix portal so the user sees the room.
@@ -382,7 +389,14 @@ func cmdMUCJoin(ce *commands.Event) {
 			_ = userIntent.EnsureJoined(ce.Ctx, portal.MXID)
 		}
 	}
-	ce.Reply("Joined **%s**. Room: %s%s", roomJID, portal.MXID.String(), connector.CommandLoginNotice(ce, login, explicit))
+	switch status {
+	case connector.MUCJoinAlreadyIn:
+		ce.Reply("Already in **%s** as **%s**; nothing was re-sent. Room: %s. Its bookmark (if your server supports bookmarks) is set to auto-join.%s", roomJID, cur, portal.MXID.String(), connector.CommandLoginNotice(ce, login, explicit))
+	case connector.MUCJoinRenaming:
+		ce.Reply("Already in **%s**; changing your nick from **%s** to **%s**, the result follows as a notice. Room: %s%s", roomJID, cur, want, portal.MXID.String(), connector.CommandLoginNotice(ce, login, explicit))
+	default:
+		ce.Reply("Joined **%s**. Room: %s%s", roomJID, portal.MXID.String(), connector.CommandLoginNotice(ce, login, explicit))
+	}
 }
 
 func cmdMUCLeave(ce *commands.Event) {
@@ -462,24 +476,46 @@ func cmdMUCNick(ce *commands.Event) {
 		return
 	}
 	roomJID := strings.TrimSpace(strings.ToLower(args[0]))
-	nick := strings.TrimSpace(args[1])
+	nick := strings.TrimSpace(strings.Join(args[1:], " "))
 	if roomJID == "" || !strings.Contains(roomJID, "@") {
 		ce.Reply("Invalid room JID. Use the form room@conference.domain.")
 		return
 	}
-	if nick == "" {
-		ce.Reply("Nick cannot be empty.")
+	nick, reason := connector.SanitizeMUCNick(roomJID, nick)
+	if reason != "" {
+		ce.Reply("Invalid nick (%s).", reason)
 		return
 	}
 	if login == nil {
 		ce.Reply("You must be logged in. Use `%s login` first.", cmdPrefix(ce))
 		return
 	}
-	if err := connector.SetMUCPreferredNickForRoom(ce.Ctx, ce.Bridge, login.ID, roomJID, nick); err != nil {
-		ce.Reply("Failed to set MUC nick: %v", err)
+	notice := connector.CommandLoginNotice(ce, login, explicit)
+	savedReply := func() {
+		ce.Reply("Preferred nick for **%s** set to **%s**. It will be used on next join (and on 409 retry); it takes precedence over the room's bookmark nick, which is left unchanged.%s", roomJID, nick, notice)
+	}
+	changer, ok := login.Client.(connector.MUCNickChanger)
+	if !ok {
+		if err := connector.SetMUCPreferredNickForRoom(ce.Ctx, ce.Bridge, login.ID, roomJID, nick); err != nil {
+			ce.Reply("Failed to set MUC nick: %v", err)
+			return
+		}
+		savedReply()
 		return
 	}
-	ce.Reply("Preferred nick for **%s** set to **%s**. It will be used on next join (and on 409 retry); it takes precedence over the room's bookmark nick, which is left unchanged.%s", roomJID, nick, connector.CommandLoginNotice(ce, login, explicit))
+	status, cur, err := changer.SetMUCNick(ce.Ctx, roomJID, nick)
+	if err != nil {
+		ce.Reply("Failed to change MUC nick: %v", err)
+		return
+	}
+	switch status {
+	case connector.MUCNickUnchanged:
+		ce.Reply("**%s** is already your nick in **%s**. Saved as the room's preferred nick (it takes precedence over the room's bookmark nick, which is left unchanged).%s", nick, roomJID, notice)
+	case connector.MUCNickChanging:
+		ce.Reply("Changing your nick in **%s** from **%s** to **%s**; the result follows as a notice.%s", roomJID, cur, nick, notice)
+	default:
+		savedReply()
+	}
 }
 
 func cmdMUCNickDefault(ce *commands.Event) {

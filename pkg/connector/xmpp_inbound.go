@@ -760,25 +760,26 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	} else {
 		encKind, body, oobURL := applyEncryption(ids.Extras, body, oobURL)
 		x.queueRemoteEvent(ctx, &jabberRemoteMessage{
-			encrypted:      encKind,
-			portalKey:      portalKey,
-			sender:         sender,
-			id:             networkid.MessageID(msgID),
-			body:           body,
-			oobURL:         oobURL,
-			replyID:        replyID,
-			replyFallback:  ids.ReplyFallback,
-			mentions:       ids.Mentions,
-			groupchat:      true,
-			reactionTarget: reactionTarget,
-			reactionEmojis: reactionEmojis,
-			stanzaID:       ids.stanzaIDBy(roomJID), // only the room's own stanza-id is believed
-			originID:       ids.OriginID,
-			occupantID:     ids.OccupantID,
-			markable:       ids.Extras.Markable,
-			timestamp:      ts,
-			idAttr:         idAttr,
-			x:              x,
+			encrypted:       encKind,
+			portalKey:       portalKey,
+			sender:          sender,
+			id:              networkid.MessageID(msgID),
+			body:            body,
+			oobURL:          oobURL,
+			replyID:         replyID,
+			replyFallback:   ids.ReplyFallback,
+			mentions:        ids.Mentions,
+			groupchat:       true,
+			pastOwnOccupant: !sender.IsFromMe && x.wasOwnMUCOccupant(roomJID, occupantFull),
+			reactionTarget:  reactionTarget,
+			reactionEmojis:  reactionEmojis,
+			stanzaID:        ids.stanzaIDBy(roomJID), // only the room's own stanza-id is believed
+			originID:        ids.OriginID,
+			occupantID:      ids.OccupantID,
+			markable:        ids.Extras.Markable,
+			timestamp:       ts,
+			idAttr:          idAttr,
+			x:               x,
 		})
 	}
 	return nil
@@ -969,16 +970,17 @@ func (x *xmppClient) handleIncomingGroupchat(msg stanza.Message, rw xmlstream.To
 	msgID := inboundMessageID(inboundIDs{idAttr: msg.ID})
 	sender := x.mucMessageSender(roomJID, occupantFull)
 	x.queueRemoteEvent(context.Background(), &jabberRemoteMessage{
-		portalKey:      portalKey,
-		sender:         sender,
-		id:             msgID,
-		body:           body,
-		replyID:        "",
-		groupchat:      true,
-		reactionTarget: reactionTarget,
-		reactionEmojis: reactionEmojis,
-		timestamp:      time.Now(),
-		x:              x,
+		portalKey:       portalKey,
+		sender:          sender,
+		id:              msgID,
+		body:            body,
+		replyID:         "",
+		groupchat:       true,
+		pastOwnOccupant: !sender.IsFromMe && x.wasOwnMUCOccupant(roomJID, occupantFull),
+		reactionTarget:  reactionTarget,
+		reactionEmojis:  reactionEmojis,
+		timestamp:       time.Now(),
+		x:               x,
 	})
 	return nil
 }
@@ -1015,6 +1017,19 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 	}
 
 	if typeVal == "error" {
+		// A refused nick change of ours (presence error from room/<requested nick>) never touches the join
+		// state and never walks the 409 alternative chain.
+		if ourNick != "" {
+			if ch := x.takeMUCNickChangeFor(roomBare, ourNick); ch != nil {
+				res, cond := nickError, info.errCondition
+				if hasConflict {
+					res = nickConflict
+				}
+				x.log.Info().Str("room", roomBare).Str("condition", cond).Msg("MUC nick change refused")
+				go x.finishMUCNickChange(roomBare, ch, res, "", cond)
+				return nil
+			}
+		}
 		if !hasConflict {
 			if ourNick != "" {
 				// An error bounced from our own occupant JID: the room no longer has us (memory only).
@@ -1042,7 +1057,13 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 	// from the OLD occupant JID. When it is our own occupant (renamed by us or by another client sharing
 	// the nick) follow it, so our echoes are still recognized (memory only).
 	if sawMUCUser && typeVal == "unavailable" && info.hasStatus("303") && info.newNick != "" {
-		x.noteOwnMUCNickChange(roomBare, fromJID.String(), info)
+		if x.noteOwnMUCNickChange(roomBare, fromJID.String(), info) {
+			if ch := x.takeMUCNickChange(roomBare); ch != nil {
+				go x.finishMUCNickChange(roomBare, ch, nickSuccess, info.newNick, "")
+			} else {
+				go x.onForeignOwnNickChange(roomBare, info.newNick)
+			}
+		}
 		return nil
 	}
 	// Our own occupant became unavailable without a rename: kicked (307), banned (301), removed by an
@@ -1074,6 +1095,12 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 		if track := x.takeMUCJoinTrackLocked(roomBare); track != nil {
 			if track.conflicted && !serverAssigned && ourNick != track.base {
 				go x.announceMUCNickChange(roomBare, track.base, track.tried[0], ourNick)
+			}
+			// A join confirmed under a 409 alternative or a server-assigned nick is an own nick change:
+			// the per-room Matrix display name follows (goroutine, own span). A join under the chosen
+			// nick is not (no mass reconciliation at connect).
+			if (track.conflicted && !serverAssigned && ourNick != track.base) || serverAssigned {
+				go x.syncOwnNickToMatrixAsync(roomBare, ourNick)
 			}
 			// The explicit join command also creates/enables the XEP-0402 bookmark (goroutine, own span).
 			if track.writeBookmark {
@@ -1124,6 +1151,9 @@ type jabberRemoteMessage struct {
 	replyFallback  replyFallback // XEP-0428 fallback range of the reply quote (offsets in body code points)
 	mentions       []mentionRef  // XEP-0372 mention references (offsets in body code points); live DM and MUC only
 	groupchat      bool          // the event came from a groupchat stanza (reply/reaction ids are room stanza-ids)
+	// pastOwnOccupant: groupchat message sent from an occupant JID we held earlier this session (replay
+	// matching only, never sender attribution).
+	pastOwnOccupant bool
 	// Stable ids stored in MessageMetadata (see dbMeta). stanzaID is only ever set from a stanza-id
 	// whose `by` is a trusted entity (room for groupchat, our account for 1:1 and MAM).
 	stanzaID       string

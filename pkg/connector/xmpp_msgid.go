@@ -137,7 +137,7 @@ type dupCandidate struct {
 // (live, carbon, MAM, MUC history): trusted stanza-id against stanza_id, then (id-less or from-me
 // candidates only) the origin-id against origin_id/xmpp_message_id and as a direct row id, then
 // (from-me only) the `id` attribute against origin_id/xmpp_message_id (Matrix-originated rows). Every
-// step is sender-restricted, so a sender can only suppress its own messages. "" when none. DB access: portal event loop or goroutines only.
+// step is sender-restricted, so a sender can only suppress its own messages (exception: the trusted stanza-id step also matches rows of our own account, see dupRowMatches). "" when none. DB access: portal event loop or goroutines only.
 func bridgedDuplicate(ctx context.Context, db *database.Database, portal networkid.PortalKey, c dupCandidate) (networkid.MessageID, error) {
 	if db == nil {
 		return "", nil
@@ -148,7 +148,7 @@ func bridgedDuplicate(ctx context.Context, db *database.Database, portal network
 		ts = now
 	}
 	since := ts.Add(-dupWindow)
-	check := func(keys []string, ref string) (networkid.MessageID, error) {
+	check := func(keys []string, ref string, trustedID bool) (networkid.MessageID, error) {
 		if ref == "" {
 			return "", nil
 		}
@@ -160,13 +160,13 @@ func bridgedDuplicate(ctx context.Context, db *database.Database, portal network
 			if id == c.id {
 				continue
 			}
-			if ok, err := dupRowMatches(ctx, db, portal, id, c); ok || err != nil {
+			if ok, err := dupRowMatches(ctx, db, portal, id, c, trustedID); ok || err != nil {
 				return id, err
 			}
 		}
 		return "", nil
 	}
-	if id, err := check([]string{metaKeyStanzaID}, c.stanzaID); id != "" || err != nil {
+	if id, err := check([]string{metaKeyStanzaID}, c.stanzaID, true); id != "" || err != nil {
 		return id, err
 	}
 	// Origin-id and id-attribute matches are sender-chosen evidence. A message from someone else that
@@ -179,11 +179,11 @@ func bridgedDuplicate(ctx context.Context, db *database.Database, portal network
 	if !c.fromMe {
 		return "", nil
 	}
-	if id, err := check([]string{metaKeyOriginID, metaKeyXMPPID}, c.originID); id != "" || err != nil {
+	if id, err := check([]string{metaKeyOriginID, metaKeyXMPPID}, c.originID, false); id != "" || err != nil {
 		return id, err
 	}
 	if c.originID != "" && networkid.MessageID(c.originID) != c.id {
-		if ok, err := dupRowMatches(ctx, db, portal, networkid.MessageID(c.originID), c); ok || err != nil {
+		if ok, err := dupRowMatches(ctx, db, portal, networkid.MessageID(c.originID), c, false); ok || err != nil {
 			if err != nil {
 				return "", err
 			}
@@ -191,20 +191,23 @@ func bridgedDuplicate(ctx context.Context, db *database.Database, portal network
 		}
 	}
 	if c.fromMe && c.idAttr != c.originID {
-		return check([]string{metaKeyOriginID, metaKeyXMPPID}, c.idAttr)
+		return check([]string{metaKeyOriginID, metaKeyXMPPID}, c.idAttr, false)
 	}
 	return "", nil
 }
 
 // dupRowMatches reports whether some part of message id lies in portal, is not older than the window
-// and was sent by the candidate's sender (dupSameSender).
-func dupRowMatches(ctx context.Context, db *database.Database, portal networkid.PortalKey, id networkid.MessageID, c dupCandidate) (bool, error) {
+// and was sent by the candidate's sender (dupSameSender). For a match by a trusted (room/server-assigned)
+// stanza-id (trustedID) a row sent by our own account also counts, whoever the candidate's sender is:
+// such an id names exactly one message, so a replay of our own message under an earlier nick of ours is
+// the same message.
+func dupRowMatches(ctx context.Context, db *database.Database, portal networkid.PortalKey, id networkid.MessageID, c dupCandidate, trustedID bool) (bool, error) {
 	parts, err := db.Message.GetAllPartsByID(ctx, portal.Receiver, id)
 	if err != nil {
 		return false, err
 	}
 	for _, p := range parts {
-		if p.Room == portal && dupSameSender(p, c) {
+		if p.Room == portal && (dupSameSender(p, c) || (trustedID && c.self != "" && strings.EqualFold(bareJID(string(p.SenderID)), bareJID(string(c.self))))) {
 			return true, nil
 		}
 	}

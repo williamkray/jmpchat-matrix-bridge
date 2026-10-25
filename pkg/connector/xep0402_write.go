@@ -200,6 +200,15 @@ func (x *xmppClient) bookmarkAfterJoin(room, base, ourNick string, conflicted bo
 	if conflicted && ourNick != base {
 		nick = ""
 	}
+	x.publishJoinBookmark(ctx, room, nick)
+}
+
+// publishJoinBookmark creates/enables the room's bookmark (autojoin on, nick only when offered).
+func (x *xmppClient) publishJoinBookmark(ctx context.Context, room, nick string) {
+	if x.joinBookmarkHook != nil {
+		x.joinBookmarkHook(room, nick)
+		return
+	}
 	x.publishBookmarkFor(ctx, room, true, nick, true)
 }
 

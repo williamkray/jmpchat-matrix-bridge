@@ -84,3 +84,40 @@ func TestOwnMUCReplayDeduped(t *testing.T) {
 		}
 	}
 }
+
+// A message from an occupant JID we held earlier (replay after a rename) gets the full own-replay check.
+func TestOwnMUCReplayPastOccupant(t *testing.T) {
+	ctx := context.Background()
+	db := realSchemaDB(t)
+	const me networkid.UserLoginID = "me@example.com"
+	room := networkid.PortalKey{ID: selfEchoRoom, Receiver: me}
+	if err := db.Portal.Insert(ctx, &database.Portal{PortalKey: room, MXID: "!room:hs"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Message.Insert(ctx, &database.Message{
+		ID: "matrix:$sent1", MXID: "$e1", Room: room, SenderID: "me@example.com", Timestamp: time.Unix(1_700_000_000, 0),
+		Metadata: &MessageMetadata{XMPPMessageID: "gen1", OriginID: "orig1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	x := newOuterFromTestClient()
+	x.conn = &JabberConnector{br: &bridgev2.Bridge{DB: db}}
+	portal := &bridgev2.Portal{Portal: &database.Portal{PortalKey: room, MXID: "!room:hs"}}
+	convert := func(past bool) bool {
+		m := &jabberRemoteMessage{
+			x: x, portalKey: room, groupchat: true, body: "hello", id: "rewritten", originID: "orig1",
+			sender: x.makeEventSender(selfEchoRoom + "/oldnick"), pastOwnOccupant: past,
+		}
+		_, err := m.ConvertMessage(ctx, portal, nil)
+		if err != nil && !errors.Is(err, bridgev2.ErrIgnoringRemoteEvent) {
+			t.Fatalf("ConvertMessage: %v", err)
+		}
+		return errors.Is(err, bridgev2.ErrIgnoringRemoteEvent)
+	}
+	if !convert(true) {
+		t.Error("replay from a past own occupant was bridged")
+	}
+	if convert(false) {
+		t.Error("the own-replay step ran for a foreign occupant")
+	}
+}

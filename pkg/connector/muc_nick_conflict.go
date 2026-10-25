@@ -114,12 +114,19 @@ func (x *xmppClient) resetMUCJoinState() {
 	x.mucPendingJoin = nil
 	x.mucJoinTracks = nil
 	x.mucJoinWant = nil
+	for _, ch := range x.mucNickChanges {
+		if ch.timer != nil {
+			ch.timer.Stop()
+		}
+	}
+	x.mucNickChanges = nil
 	x.mucJoinGen++
 	x.mucPendingJoinMu.Unlock()
 	// A new c2s session is in no room: the occupant JIDs of the previous session are stale (the rooms
 	// dropped us with the old session). Joins of this session record them again on confirmation.
 	x.mucOurOccupantJIDMu.Lock()
 	x.mucOurOccupantJID = nil
+	x.mucPastOwn = nil
 	x.mucOurOccupantJIDMu.Unlock()
 }
 

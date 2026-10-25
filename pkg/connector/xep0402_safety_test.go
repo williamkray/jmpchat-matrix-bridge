@@ -60,7 +60,7 @@ type errFakeTimeout struct{}
 func (errFakeTimeout) Error() string { return "timeout" }
 
 // Sending/viewing in a room we are already in sends nothing (a re-join would replay the occupant list
-// and history); the join command still applies the nick choice.
+// and history); the join command on a joined room changes only the nick.
 func TestJoinForPortalKeepsCurrentNick(t *testing.T) {
 	r := newBMRig(t, true)
 	r.addPortal(bmRoom, false)
@@ -71,11 +71,20 @@ func TestJoinForPortalKeepsCurrentNick(t *testing.T) {
 	if j := r.joins(); len(j) != 0 {
 		t.Fatalf("joins = %v", j)
 	}
+	var changes []string
+	r.x.mucNickChangeHook = func(room, nick string) error {
+		changes = append(changes, room+"|"+nick)
+		return nil
+	}
 	if err := r.x.JoinMUC(context.Background(), bmRoom); err != nil {
 		t.Fatal(err)
 	}
-	if j := r.joins(); len(j) != 1 || j[0] != bmRoom+"|alice" {
+	// Already in the room: no join presence (no history replay), only a nick change.
+	if j := r.joins(); len(j) != 0 {
 		t.Fatalf("joins = %v", j)
+	}
+	if len(changes) != 1 || changes[0] != bmRoom+"|alice" {
+		t.Fatalf("nick changes = %v", changes)
 	}
 }
 

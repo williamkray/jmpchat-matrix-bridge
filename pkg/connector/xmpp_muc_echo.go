@@ -236,6 +236,15 @@ func (x *xmppClient) noteOwnMUCNickChange(roomBare, oldOccupant string, info pre
 	if x.mucOurOccupantJID == nil {
 		x.mucOurOccupantJID = make(map[string]string)
 	}
+	// The JIDs we held until now stay recognizable (echo/replay matching of messages sent just before
+	// the rename), see mucPastOwn.
+	now := time.Now()
+	if oldOccupant != newJID.String() {
+		x.noteMUCPastOwnLocked(roomBare, oldOccupant, now)
+	}
+	if ours != "" && ours != oldOccupant && ours != newJID.String() {
+		x.noteMUCPastOwnLocked(roomBare, ours, now)
+	}
 	x.mucOurOccupantJID[roomBare] = newJID.String()
 	x.mucOurOccupantJIDMu.Unlock()
 	x.log.Info().Str("room", roomBare).Str("old_nick", resourceOf(oldOccupant)).Str("new_nick", info.newNick).Msg("MUC own nick changed, following it")
@@ -267,7 +276,8 @@ func (x *xmppClient) mucMessageSender(room, occupantFull string) bridgev2.EventS
 func (x *xmppClient) handleOwnMUCEcho(room, occupantFull, idAttr string, ids messageIDs) bool {
 	// An echo comes from our own occupant JID; when we do not know it (yet), the registered random id
 	// is the only evidence. A known, different occupant is never ours.
-	if ours := x.getMUCOurOccupantJID(room); ours != "" && occupantFull != ours {
+	// An echo of a message sent just before our own rename comes from the old occupant JID.
+	if ours := x.getMUCOurOccupantJID(room); ours != "" && occupantFull != ours && !x.wasOwnMUCOccupantForEcho(room, occupantFull, time.Now()) {
 		return false
 	}
 	res := x.mucEcho.matchEcho(room, []string{ids.OriginID, idAttr}, ids.stanzaIDBy(room), ids.OccupantID)
@@ -364,7 +374,7 @@ func ownMUCReplayExists(ctx context.Context, db *database.Database, portal netwo
 // isOwnMUCReplay is ownMUCReplayExists for an inbound from-me groupchat message. A lookup error is
 // logged and treated as "not a replay" (a duplicate is better than a lost message).
 func (m *jabberRemoteMessage) isOwnMUCReplay(ctx context.Context) bool {
-	if !m.groupchat || !m.sender.IsFromMe || m.x == nil || m.x.conn == nil || m.x.conn.br == nil {
+	if !m.groupchat || !(m.sender.IsFromMe || m.pastOwnOccupant) || m.x == nil || m.x.conn == nil || m.x.conn.br == nil {
 		return false
 	}
 	dup, err := ownMUCReplayExists(ctx, m.x.conn.br.DB, m.portalKey, networkid.UserID(m.x.loginID), m.stanzaID, m.originID, string(m.id))
