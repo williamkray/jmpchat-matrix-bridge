@@ -1108,6 +1108,10 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 				go x.bookmarkAfterJoin(roomBare, track.base, ourNick, track.conflicted || serverAssigned)
 			}
 		}
+		// One-time (per session) strip of the double puppet marker from our member event (goroutine).
+		if x.nickSyncOn() {
+			go x.nickSyncCleanupAsync(roomBare)
+		}
 		// Queue ChatResync so the bridge re-fetches GetChatInfo (and can refresh room/ghost info after rejoin).
 		if x.login != nil {
 			x.queueRemoteEvent(context.Background(), &simplevent.ChatResync{

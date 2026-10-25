@@ -2,7 +2,10 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -11,9 +14,11 @@ import (
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/configupgrade"
 	"gopkg.in/yaml.v3"
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/appservice"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
@@ -166,9 +171,6 @@ func TestProfileChangeFilters(t *testing.T) {
 		{"state key not the user", func(r *syncRig, m *bridgev2.MatrixMembershipChange) {
 			k := "@other:example.com"
 			m.Event.StateKey = &k
-		}},
-		{"double puppet key", func(r *syncRig, m *bridgev2.MatrixMembershipChange) {
-			m.Event.Content.Raw[appservice.DoublePuppetKey] = "x"
 		}},
 		{"avatar only", func(r *syncRig, m *bridgev2.MatrixMembershipChange) { m.PrevContent.Displayname = "Bob" }},
 		{"empty displayname", func(r *syncRig, m *bridgev2.MatrixMembershipChange) { m.Content.Displayname = "  " }},
@@ -440,5 +442,174 @@ func TestNickSyncDoesNotLogDisplayNames(t *testing.T) {
 		t.Fatal("nothing logged; the test proves nothing")
 	} else if strings.Contains(out, secret) {
 		t.Fatalf("display name leaked into the logs:\n%s", out)
+	}
+}
+
+func markedMember() map[string]any {
+	return map[string]any{
+		"membership": "join", "displayname": "Old", "avatar_url": "mxc://example.com/a",
+		appservice.DoublePuppetKey: "jmpchat-matrix-bridge", "join_authorised_via_users_server": "@s:x",
+	}
+}
+
+func TestOwnWriteStripsMarkerAndEchoIgnoredOnce(t *testing.T) {
+	r := newSyncRig(t)
+	r.member = markedMember()
+	r.member[appservice.DoublePuppetTSKey] = float64(5)
+	foreign := func() {
+		r.joined("alice")
+		presenceStanza(t, r.x, "unavailable", nickRoom+"/alice", renameBody("bob", "303", "110"))
+	}
+	foreign()
+	syncWaitFor(t, "write", func() bool { return len(r.writeList()) == 1 })
+	w := r.writeList()[0]
+	for _, k := range []string{appservice.DoublePuppetKey, appservice.DoublePuppetTSKey, "join_authorised_via_users_server"} {
+		if _, ok := w[k]; ok {
+			t.Fatalf("%s kept: %v", k, w)
+		}
+	}
+	if w["displayname"] != "bob" || w["avatar_url"] != "mxc://example.com/a" {
+		t.Fatalf("write = %v", w)
+	}
+	// The echo of the write (Old -> bob) is ignored, once.
+	r.profile("bob", "Old")
+	if r.pendingCount() != 0 {
+		t.Fatal("echo scheduled")
+	}
+	r.profile("bob", "Old")
+	if r.pendingCount() != 1 {
+		t.Fatal("second identical change not processed after the echo was consumed")
+	}
+}
+
+func TestOwnWriteEchoExpires(t *testing.T) {
+	r := newSyncRig(t)
+	r.x.nickSync.recordOwnWrite("!room:x", "Bob")
+	r.x.nickSync.mu.Lock()
+	w := r.x.nickSync.writes["!room:x"]
+	w.at = time.Now().Add(-3 * time.Minute)
+	r.x.nickSync.writes["!room:x"] = w
+	r.x.nickSync.mu.Unlock()
+	r.profile("Bob", "Old")
+	if r.pendingCount() != 1 {
+		t.Fatal("expired entry swallowed a real change")
+	}
+}
+
+func TestProfileChangeWithMarkerIsProcessed(t *testing.T) {
+	r := newSyncRig(t)
+	m := r.change("Bob", "Old")
+	m.Event.Content.Raw[appservice.DoublePuppetKey] = "jmpchat-matrix-bridge"
+	r.x.handleOwnProfileChange(context.Background(), m)
+	if r.pendingCount() != 1 {
+		t.Fatal("client copy carrying the marker was dropped")
+	}
+}
+
+func TestMarkerCleanup(t *testing.T) {
+	run := func(r *syncRig) { r.x.nickSyncCleanupAsync(nickRoom) }
+	r := newSyncRig(t)
+	r.member = markedMember()
+	run(r)
+	ws := r.writeList()
+	if len(ws) != 1 {
+		t.Fatalf("writes = %v", ws)
+	}
+	if _, ok := ws[0][appservice.DoublePuppetKey]; ok || ws[0]["displayname"] != "Old" || ws[0]["avatar_url"] != "mxc://example.com/a" {
+		t.Fatalf("write = %v", ws[0])
+	}
+	if !r.x.nickSync.consumeOwnWrite("!room:x", "Old") {
+		t.Fatal("cleanup write not recorded")
+	}
+	run(r) // once per portal per session
+	if len(r.writeList()) != 1 {
+		t.Fatal("ran twice")
+	}
+	r.x.nickSync.reset()
+	run(r)
+	if len(r.writeList()) != 2 {
+		t.Fatal("did not run again after a session reset")
+	}
+	if r.x.nickSync.cleanNext.IsZero() {
+		t.Fatal("no stagger slot taken")
+	}
+
+	for name, setup := range map[string]func(r *syncRig){
+		"no marker":  func(r *syncRig) { r.member = map[string]any{"membership": "join", "displayname": "Old"} },
+		"sync off":   func(r *syncRig) { r.setSync(false) },
+		"no puppet":  func(r *syncRig) { r.dp = false },
+		"dm":         func(r *syncRig) { r.portal.RoomType = database.RoomTypeDM },
+		"left":       func(r *syncRig) { r.portal.Metadata = &PortalMetadata{MUCLeft: true} },
+		"pending":    func(r *syncRig) { r.portal.Metadata = &PortalMetadata{MUCInvitePending: true} },
+		"not joined": func(r *syncRig) { r.member["membership"] = "leave" },
+	} {
+		r := newSyncRig(t)
+		r.member = markedMember()
+		setup(r)
+		run(r)
+		if len(r.writeList()) != 0 {
+			t.Fatalf("%s: wrote %v", name, r.writeList())
+		}
+	}
+}
+
+func TestMarkerCleanupStartedByJoinConfirmationOffServe(t *testing.T) {
+	r := newSyncRig(t)
+	r.member = markedMember()
+	r.x.mucPendingJoinMu.Lock()
+	r.x.mucPendingJoin = map[string]string{nickRoom: "me"}
+	r.x.mucPendingJoinMu.Unlock()
+	presenceStanza(t, r.x, "", nickRoom+"/me", `<x xmlns="http://jabber.org/protocol/muc#user"><item affiliation="member" role="participant"/><status code="110"/></x>`)
+	syncWaitFor(t, "cleanup write", func() bool { return len(r.writeList()) == 1 })
+	if _, ok := r.writeList()[0][appservice.DoublePuppetKey]; ok {
+		t.Fatal("marker kept")
+	}
+}
+
+type fakeDP struct {
+	bridgev2.MatrixAPI
+	sent []map[string]any
+}
+
+func (f *fakeDP) SendState(_ context.Context, _ id.RoomID, _ event.Type, _ string, c *event.Content, _ time.Time) (*mautrix.RespSendEvent, error) {
+	f.sent = append(f.sent, c.Raw)
+	return &mautrix.RespSendEvent{}, nil
+}
+
+func TestSendOwnMemberPaths(t *testing.T) {
+	r := newSyncRig(t)
+	x := r.x
+	x.memberSetHook = nil
+	content := cleanMemberContent(markedMember())
+	content["displayname"] = "Bob"
+
+	// Raw path: PUT straight to the homeserver, body without marker, no IntentAPI wrapper.
+	var gotPath string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		gotPath = req.URL.EscapedPath()
+		_ = json.NewDecoder(req.Body).Decode(&gotBody)
+		_, _ = w.Write([]byte(`{"event_id":"$e"}`))
+	}))
+	defer srv.Close()
+	cli, err := mautrix.NewClient(srv.URL, syncUser, "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	as := &matrix.ASIntent{Matrix: &appservice.IntentAPI{Client: cli}}
+	if err := x.sendOwnMember(context.Background(), as, "!room:x", content); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotPath, "/rooms/!room:x/state/m.room.member/") && !strings.Contains(gotPath, "%21room:x/state/m.room.member/") {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if _, ok := gotBody[appservice.DoublePuppetKey]; ok || gotBody["displayname"] != "Bob" {
+		t.Fatalf("body = %v", gotBody)
+	}
+
+	// Fallback: a double puppet that is not an appservice intent goes through SendState.
+	f := &fakeDP{}
+	if err := x.sendOwnMember(context.Background(), f, "!room:x", content); err != nil || len(f.sent) != 1 || f.sent[0]["displayname"] != "Bob" {
+		t.Fatalf("fallback err=%v sent=%v", err, f.sent)
 	}
 }

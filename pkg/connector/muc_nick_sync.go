@@ -56,6 +56,60 @@ type nickSyncReq struct {
 type nickSyncState struct {
 	mu      sync.Mutex
 	pending map[networkid.PortalID]*nickSyncReq
+	// writes records our own recent member event writes per Matrix room (echo detection, see
+	// recordOwnWrite); cleaned/cleanNext drive the once-per-session marker cleanup.
+	writes    map[id.RoomID]ownMemberWrite
+	cleaned   map[networkid.PortalID]bool
+	cleanNext time.Time
+}
+
+// ownMemberWrite is one of our own recent member event writes (the display name is never logged).
+type ownMemberWrite struct {
+	display string
+	at      time.Time
+}
+
+const (
+	ownWriteTTL           = 2 * time.Minute
+	nickCleanupStagger    = 500 * time.Millisecond
+	doublePuppetSourceKey = "fi.mau.double_puppet_source"
+)
+
+// recordOwnWrite remembers that we are about to set the room display name to display.
+func (s *nickSyncState) recordOwnWrite(room id.RoomID, display string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if s.writes == nil || len(s.writes) >= nickSyncMapCap {
+		s.writes = map[id.RoomID]ownMemberWrite{}
+	}
+	for r, w := range s.writes {
+		if now.Sub(w.at) > ownWriteTTL {
+			delete(s.writes, r)
+		}
+	}
+	s.writes[room] = ownMemberWrite{display: display, at: now}
+}
+
+func (s *nickSyncState) forgetOwnWrite(room id.RoomID, display string) {
+	s.mu.Lock()
+	if w, ok := s.writes[room]; ok && w.display == display {
+		delete(s.writes, room)
+	}
+	s.mu.Unlock()
+}
+
+// consumeOwnWrite reports (and consumes) whether a member event with this display name is the echo of a
+// recent write of ours.
+func (s *nickSyncState) consumeOwnWrite(room id.RoomID, display string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, ok := s.writes[room]
+	if !ok || w.display != display || time.Since(w.at) > ownWriteTTL {
+		return false
+	}
+	delete(s.writes, room)
+	return true
 }
 
 func (s *nickSyncState) reset() {
@@ -64,6 +118,9 @@ func (s *nickSyncState) reset() {
 		r.timer.Stop()
 	}
 	s.pending = nil
+	s.writes = nil
+	s.cleaned = nil
+	s.cleanNext = time.Time{}
 	s.mu.Unlock()
 }
 
@@ -126,9 +183,8 @@ func (x *xmppClient) handleOwnProfileChange(ctx context.Context, msg *bridgev2.M
 	if x.login == nil || msg.Event == nil || msg.Event.Sender != x.login.UserMXID || msg.Event.GetStateKey() != string(x.login.UserMXID) {
 		return
 	}
-	if _, dp := msg.Event.Content.Raw[appservice.DoublePuppetKey]; dp {
-		return // our own double-puppet write (bridgev2 drops these too)
-	}
+	// No double-puppet marker check: bridgev2 already drops genuine marked events of ours, and a marked
+	// event that reaches us is a client copy (Element's /myroomnick keeps the key) of a real user change.
 	var newName, oldName string
 	if msg.Content != nil {
 		newName = msg.Content.Displayname
@@ -138,6 +194,9 @@ func (x *xmppClient) handleOwnProfileChange(ctx context.Context, msg *bridgev2.M
 	}
 	if newName == oldName || strings.TrimSpace(newName) == "" {
 		return // avatar-only change, or a cleared name
+	}
+	if x.nickSync.consumeOwnWrite(msg.Portal.MXID, newName) {
+		return // the echo of our own write (our writes carry no marker)
 	}
 	if !x.nickSyncPortalOK(msg.Portal.Portal) {
 		return
@@ -349,28 +408,114 @@ func marshalToMap(v any) (map[string]any, error) {
 	return m, nil
 }
 
-// writeOwnDisplayname sets the displayname of the user's member event through the double puppet, keeping
-// every other key (avatar_url, unknown keys). The double puppet marker added by the intent has no ts, so
-// bridgev2 drops the resulting event (no loop).
-func (x *xmppClient) writeOwnDisplayname(ctx context.Context, dp bridgev2.MatrixAPI, room id.RoomID, raw map[string]any, name string) error {
-	newRaw := make(map[string]any, len(raw))
+// cleanMemberContent copies raw and drops the keys that must not be re-sent: join_authorised_via_users_server
+// is only valid on the original restricted join (the server would check its signature again), the
+// double-puppet marker keys must not be on our writes (see sendOwnMember), the rest is per-event.
+func cleanMemberContent(raw map[string]any) map[string]any {
+	out := make(map[string]any, len(raw))
 	for k, v := range raw {
-		newRaw[k] = v
+		out[k] = v
 	}
-	newRaw["displayname"] = name
-	// join_authorised_via_users_server is only valid on the original restricted join (the server would
-	// check its signature again), so it is dropped like Element's /myroomnick does.
 	for _, k := range []string{"reason", "join_authorised_via_users_server", appservice.DoublePuppetKey, appservice.DoublePuppetTSKey, "com.beeper.member_rollback"} {
-		delete(newRaw, k)
+		delete(out, k)
 	}
+	return out
+}
+
+// sendOwnMember sends the user's member event content. It goes through the double puppet's RAW client
+// (ASIntent.Matrix.Client, bypassing IntentAPI.SendStateEvent, which adds fi.mau.double_puppet_source
+// without a ts): Element's /myroomnick copies the current member content including that key, and
+// bridgev2 drops every event with our source and no ts, so the user's real change would never arrive.
+// A double puppet that is not an appservice intent falls back to SendState (marker accepted).
+func (x *xmppClient) sendOwnMember(ctx context.Context, dp bridgev2.MatrixAPI, room id.RoomID, content map[string]any) error {
 	if x.memberSetHook != nil {
-		return x.memberSetHook(room, newRaw)
+		return x.memberSetHook(room, content)
 	}
 	if dp == nil || x.login == nil {
 		return fmt.Errorf("no double puppet")
 	}
-	_, err := dp.SendState(ctx, room, event.StateMember, string(x.login.UserMXID), &event.Content{Raw: newRaw}, time.Now())
+	if as, ok := dp.(*matrix.ASIntent); ok && as != nil && as.Matrix != nil && as.Matrix.Client != nil {
+		_, err := as.Matrix.Client.SendStateEvent(ctx, room, event.StateMember, string(x.login.UserMXID), content)
+		return err
+	}
+	_, err := dp.SendState(ctx, room, event.StateMember, string(x.login.UserMXID), &event.Content{Raw: content}, time.Now())
 	return err
+}
+
+// writeOwnDisplayname sets the displayname of the user's member event through the double puppet, keeping
+// every other key (avatar_url, unknown keys) but no marker. The write is recorded first, so its echo is
+// recognized by handleOwnProfileChange (no loop).
+func (x *xmppClient) writeOwnDisplayname(ctx context.Context, dp bridgev2.MatrixAPI, room id.RoomID, raw map[string]any, name string) error {
+	newRaw := cleanMemberContent(raw)
+	newRaw["displayname"] = name
+	x.nickSync.recordOwnWrite(room, name)
+	err := x.sendOwnMember(ctx, dp, room, newRaw)
+	if err != nil {
+		x.nickSync.forgetOwnWrite(room, name)
+	}
+	return err
+}
+
+// nickSyncCleanupAsync (goroutine, own span; started when our join of the room is confirmed) strips the
+// double-puppet marker from the user's existing member event once per portal per session, so Element's
+// /myroomnick copy of it is no longer dropped by bridgev2. Displayname and avatar are never changed.
+func (x *xmppClient) nickSyncCleanupAsync(roomBare string) {
+	if !x.nickSyncOn() {
+		return
+	}
+	portalID := networkid.PortalID(roomBare)
+	s := &x.nickSync
+	s.mu.Lock()
+	if s.cleaned[portalID] {
+		s.mu.Unlock()
+		return
+	}
+	if s.cleaned == nil {
+		s.cleaned = map[networkid.PortalID]bool{}
+	}
+	s.cleaned[portalID] = true
+	slot := time.Now()
+	if s.cleanNext.After(slot) {
+		slot = s.cleanNext
+	}
+	s.cleanNext = slot.Add(nickCleanupStagger)
+	s.mu.Unlock()
+	if d := time.Until(slot); d > 0 {
+		time.Sleep(d)
+	}
+	ctx, span := telemetry.Start(context.Background(), "xmpp.muc.nick_sync_cleanup", trace.WithSpanKind(trace.SpanKindConsumer))
+	defer span.End()
+	if span.IsRecording() {
+		span.SetAttributes(attribute.String("xmpp.room.jid", roomBare))
+	}
+	if !x.nickSyncOn() {
+		return
+	}
+	log := x.logFor(ctx)
+	portal, err := x.lookupMUCPortal(ctx, roomBare)
+	if err != nil || !x.nickSyncPortalOK(portal) {
+		return
+	}
+	dp, ok := x.ownDoublePuppet(ctx)
+	if !ok {
+		return
+	}
+	raw, membership, display, err := x.readOwnMember(ctx, portal.MXID)
+	if err != nil || membership != string(event.MembershipJoin) {
+		return
+	}
+	if _, marked := raw[doublePuppetSourceKey]; !marked {
+		return
+	}
+	clean := cleanMemberContent(raw)
+	s.recordOwnWrite(portal.MXID, display)
+	if err := x.sendOwnMember(ctx, dp, portal.MXID, clean); err != nil {
+		s.forgetOwnWrite(portal.MXID, display)
+		telemetry.Fail(span, err)
+		log.Warn().Err(err).Str("room", roomBare).Msg("Failed to strip the double puppet marker from the member event")
+		return
+	}
+	log.Debug().Str("room", roomBare).Msg("Stripped the double puppet marker from the member event")
 }
 
 // syncOwnNickToMatrix sets the user's per-room Matrix display name to nick (double puppet only; never on
