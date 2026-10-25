@@ -22,19 +22,19 @@ This project was called mautrix-jabber before version 0.6.0 (docs of earlier rel
 
 ## Build
 
-Default build includes **Matrix end-to-bridge encryption (E2BE)** and requires CGO and libolm:
+Default build includes **Matrix end-to-bridge encryption (E2BE)** through mautrix-go's pure-Go Olm implementation (`goolm` build tag; no libolm needed) and requires CGO (sqlite3):
 
 ```bash
 ./build.sh
 ```
 
-Or with Go (libolm dev headers must be installed):
+Or with Go:
 
 ```bash
-CGO_ENABLED=1 go build -ldflags "-s -w" -o jmpchat-matrix-bridge ./cmd/jmpchat-matrix-bridge
+CGO_ENABLED=1 go build -tags goolm -ldflags "-s -w" -o jmpchat-matrix-bridge ./cmd/jmpchat-matrix-bridge
 ```
 
-To build without encryption support (no libolm): `go build -tags nocrypto -ldflags "-s -w" -o jmpchat-matrix-bridge ./cmd/jmpchat-matrix-bridge`. The Docker image is built with E2BE and SIP call support. To include [calls](#calls-sip-via-jmp) in a Go build, add the tags `sipcalls nolibopusfile` (e.g. `-tags "nocrypto sipcalls nolibopusfile"`; needs libopus dev headers and pkg-config).
+Without the `goolm` tag mautrix-go links libolm instead (needs its dev headers). To build without encryption support: `go build -tags nocrypto -ldflags "-s -w" -o jmpchat-matrix-bridge ./cmd/jmpchat-matrix-bridge`. The Docker image is built with E2BE and SIP call support. To include [calls](#calls-sip-via-jmp) in a Go build, add the tags `sipcalls nolibopusfile` (e.g. `-tags "goolm sipcalls nolibopusfile"`; needs libopus dev headers and pkg-config).
 
 ## Setup
 
@@ -533,7 +533,7 @@ When the same Jabber account is used by the bridge and another app (e.g. Gajim, 
 ## Status
 
 - **DM bridging** – JID+password login, 1:1 chats, portal creation on first message, identifier resolution (`!jabber pm` / `!jabber start-chat` with optional login JID for multi-account).
-- **E2BE** – Build includes libolm; enable via `encryption.allow` and related config.
+- **E2BE** – Built with goolm (pure Go; existing libolm crypto state is read as is); enable via `encryption.allow` and related config.
 - **Implemented** – Reconnection with backoff (a login the server rejects, for example after a password change, switches the bridge state to bad credentials, posts a notice in the management room and stops reconnecting until you log in again), XEP-0199 keepalive (a silent connection is pinged after 90 s and reconnected when the server does not answer; server pings are answered; the bridge also pings its own address every 3 minutes so a session the server stops delivering to is reconnected), IPv6/dual-stack, DNS SRV lookup (`_xmpps-client`, `_xmpp-client`) with XEP-0368 direct TLS and a per-login server override (`!jabber login password-server <jid> <password> <server>`, where server is `host`, `host:port`, `tls://host:port` or `auto`; the certificate is always verified against the JID domain; overrides, and SRV targets on ports other than 5222/5223, that resolve to private/loopback addresses need `network.allow_private_server_override: true`), media (Matrix↔XMPP), reactions (single per user), quotes/replies (in MUCs the reply/reaction id is the room's stanza-id, resolved room-scoped; the XEP-0428 quote fallback is removed when the original is known; DM/MUC live messages only, carbons and MAM do not carry replies yet), contact roster and display names (`!jabber add-to-roster`, `!jabber save-contact`, `!jabber remove-from-roster`, `!jabber sync-roster`), MUC (join/leave, message routing, auto-rejoin, XEP-0402 bookmark sync), MAM (XEP-0313) backfill and periodic catch-up (~45s), Message Carbons (XEP-0280), typing (XEP-0085), read markers (XEP-0333) and delivery receipts (XEP-0184) in both directions (contacts' typing, read and delivery state show in Matrix; yours are sent to contacts that support them, never to Cheogram SMS/MMS numbers; each can be switched off with `network.send_typing`, `send_read_markers`, `send_delivery_receipts` and `muc_read_markers`, all default true; `muc_read_markers` tells every occupant of a group chat which message you read, and group chat markers are only sent for rooms the bridge is currently in). When backfill is enabled, **full backfill** runs for roster DMs after each connect and on `!jabber sync-roster` (so portals get history before new messages; sync-roster runs it without re-login). See [ROADMAP.md](ROADMAP.md) for phase summary.
 - **Retractions (XMPP → Matrix)** – XEP-0424 message retraction and XEP-0425 moderation redact the bridged Matrix message (the standard "message deleted" placeholder is shown; a moderation or retraction reason becomes the redaction reason). The legacy `urn:xmpp:message-retract:0` forms are parsed best-effort (inbound only). A retraction is only honoured from the original sender (1:1 bare JID, MUC occupant-id or occupant JID) or, for moderation, from the room itself; the retracted ids are remembered (`jabber_retracted:*` rows in the bridge key-value table, never expired) so MUC history replay, MAM catch-up and backfill do not bring the message back. Known gaps: moderation that happens while the bridge is offline (MUC history is not archived/queried), a retraction that arrives before its original, and the `->>` JSON lookup is only tested against SQLite locally (Postgres jsonb uses the same operator). 
 - **Corrections (XEP-0308, both ways)** – an inbound correction (live, message carbons, MAM catch-up/backfill) edits the bridged Matrix message instead of arriving as a new one; it is only honoured from the original sender (same ownership rules as retractions), is ignored when the original is unknown, retracted or a file/caption, and applied corrections are remembered (`jabber_corrected:*` key-value rows, never expired) so history replays and overlapping MAM windows do not re-apply them; a correction of a previous correction is resolved back to the original. Editing one of your own text messages in Matrix sends a `<replace>` correction (always naming the original id; DMs and MUCs). Editing a message to a Cheogram/SMS number sends the new text as a new message prefixed with `* ` (SMS cannot be corrected; the Matrix edit stands). Known gaps: corrections of files/captions are ignored in both directions, rows stored before the `media` metadata flag existed are treated as text, a correction that arrives before its original is ignored, a MUC correction of your own message needs double puppeting to appear as an edit, and in FetchMessages batch backfill a correction whose original is outside the batch is dropped.

@@ -8,21 +8,21 @@ jmpchat-matrix-bridge (formerly mautrix-jabber) is a Matrix-Jabber (XMPP) puppet
 
 ## Build
 
-Builds use Docker to ensure a repeatable environment with all C dependencies (CGO, libolm, libopus, sqlite-dev):
+Builds use Docker to ensure a repeatable environment with all C dependencies (CGO, libopus, sqlite-dev):
 
 ```bash
 ./build.sh
 ```
 
-This runs `docker build` (tags `sipcalls nolibopusfile`, so SIP calls are included) and extracts the binary. For a local build without encryption support (requires Go 1.26+, CGO, sqlite-dev):
+This runs `docker build` (tags `goolm sipcalls nolibopusfile`, so SIP calls are included) and extracts the binary. For a local build (requires Go 1.26+, CGO, sqlite-dev; `goolm` is mautrix-go's pure-Go Olm, so E2EE needs no C library):
 
 ```bash
-go build -tags nocrypto -ldflags "-s -w" -o jmpchat-matrix-bridge ./cmd/jmpchat-matrix-bridge
+go build -tags goolm -ldflags "-s -w" -o jmpchat-matrix-bridge ./cmd/jmpchat-matrix-bridge
 ```
 
-To include calls in a local build (also needs libopus dev headers and pkg-config): `go build -tags "nocrypto sipcalls nolibopusfile" ...`.
+To include calls in a local build (also needs libopus dev headers and pkg-config): `go build -tags "goolm sipcalls nolibopusfile" ...`.
 
-The production build includes libolm for Matrix E2EE. Unit tests run with `go test -tags nocrypto ./...`; there is no lint configuration.
+The production build uses goolm for Matrix E2EE (no libolm since v0.11; goolm reads/writes the libolm pickle format, so existing crypto stores keep working and a rollback is safe). `nocrypto` still builds without E2EE. Unit tests run with `go test -tags goolm ./...` (or `-tags nocrypto`); there is no lint configuration.
 
 ## Naming
 
@@ -244,4 +244,4 @@ A local verification config also exists: `config.verify.yaml` / `registration.ve
 
 ## SIP calls
 
-Calls for Cheogram/JMP numbers (SIP -> MatrixRTC) are behind build tag `sipcalls`, in files named `pkg/connector/*sipcalls*.go` (plus `pkg/telemetry/backend_sipcalls*.go` and `cmd/jmpchat-matrix-bridge/variant_sipcalls.go`); untagged files only hold call-free extension seams (`extension.go`). `sipcalls_widgetfeatures.go` implements the Dialpad widget's optional host features (`hostkit.RosterOnlyPrefs`/`ChatOpener`/`ContactSaver`/`ContactLookup`, wired as `Deps.Features`): roster-only toggle, Message (reuses `ResolveCallRoom`, detached from the request, MAM backfill afterwards via `xmppClient.backfillChatAsync`), Save contact (the `save-contact` roster set) and the saved-name lookup; the widget and this file never log or trace contact names (the roster-fetch log line in `syncRoster` still logs roster names; `SetRosterItem` and the roster-push handler no longer do). The tag is included in the default Docker build/image (with `nolibopusfile`); calls stay off unless `network.calls.enabled: true`. The call core is the public module `github.com/williamkray/mrtc-sip-bridge`; the host contract and user docs are in its `docs/EMBEDDING.md`. Local dev builds with calls use `-tags "nocrypto sipcalls nolibopusfile"` (needs libopus dev headers and pkg-config).
+Calls for Cheogram/JMP numbers (SIP -> MatrixRTC) are behind build tag `sipcalls`, in files named `pkg/connector/*sipcalls*.go` (plus `pkg/telemetry/backend_sipcalls*.go` and `cmd/jmpchat-matrix-bridge/variant_sipcalls.go`); untagged files only hold call-free extension seams (`extension.go`). `sipcalls_widgetfeatures.go` implements the Dialpad widget's optional host features (`hostkit.RosterOnlyPrefs`/`ChatOpener`/`ContactSaver`/`ContactLookup`, wired as `Deps.Features`): roster-only toggle, Message (reuses `ResolveCallRoom`, detached from the request, MAM backfill afterwards via `xmppClient.backfillChatAsync`), Save contact (the `save-contact` roster set) and the saved-name lookup; the widget and this file never log or trace contact names (the roster-fetch log line in `syncRoster` still logs roster names; `SetRosterItem` and the roster-push handler no longer do). The tag is included in the default Docker build/image (with `nolibopusfile`); calls stay off unless `network.calls.enabled: true`. The call core is the public module `github.com/williamkray/mrtc-sip-bridge`; the host contract and user docs are in its `docs/EMBEDDING.md`. Local dev builds with calls use `-tags "goolm sipcalls nolibopusfile"` (needs libopus dev headers and pkg-config).

@@ -1,8 +1,8 @@
-# Build stage (CGO required: sqlite3, libolm for E2BE, libopus for calls)
+# Build stage (CGO required: sqlite3, libopus for calls; E2BE uses the pure-Go goolm, no libolm)
 # Go >= 1.27.3 / 1.26.10: crypto/x509 blocks the compromised eMudhra intermediates (CVE-2026-111943).
 FROM golang:1.27.3-alpine3.24 AS builder
 
-RUN apk add --no-cache ca-certificates gcc g++ musl-dev sqlite-dev olm-dev opus-dev pkgconf
+RUN apk add --no-cache ca-certificates gcc g++ musl-dev sqlite-dev opus-dev pkgconf
 
 WORKDIR /build
 
@@ -15,8 +15,9 @@ ARG GIT_COMMIT=unknown
 ARG GIT_TAG=unknown
 ARG GIT_REPOSITORY_URL=unknown
 ARG BUILD_TIME=unknown
+# goolm: mautrix-go's pure-Go Olm (reads/writes the libolm pickle format, so existing crypto state keeps working).
 # sipcalls: SIP call support (off unless network.calls.enabled); nolibopusfile: hraban/opus without opusfile.
-RUN CGO_ENABLED=1 go build -tags "sipcalls nolibopusfile" -ldflags "-s -w \
+RUN CGO_ENABLED=1 go build -tags "goolm sipcalls nolibopusfile" -ldflags "-s -w \
 	-X main.Commit=${GIT_COMMIT} -X main.Tag=${GIT_TAG} \
 	-X main.RepositoryURL=${GIT_REPOSITORY_URL} -X main.BuildTime=${BUILD_TIME}" \
 	-o jmpchat-matrix-bridge ./cmd/jmpchat-matrix-bridge
@@ -31,7 +32,7 @@ LABEL org.opencontainers.image.revision=${GIT_COMMIT} \
 
 # --upgrade pulls the current CA bundle (>= 20261020: emSign ECC Root CA - G3, Root CA - C1 and ECC Root CA - C3 removed)
 # and any other security fixes newer than the base image.
-RUN apk upgrade --no-cache && apk add --no-cache --upgrade ca-certificates tzdata sqlite-libs olm opus
+RUN apk upgrade --no-cache && apk add --no-cache --upgrade ca-certificates tzdata sqlite-libs opus
 
 # Run as non-root
 RUN adduser -D -h /app -s /sbin/nologin bridge && mkdir -p /data && chown bridge:bridge /data
