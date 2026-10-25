@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
@@ -52,6 +53,12 @@ func TestInboundMessageContentNotLogged(t *testing.T) {
 	runHandler(t, x, `<message from="me@example.com"><sent xmlns="urn:xmpp:carbons:2"><forwarded xmlns="urn:xmpp:forward:0"><message xmlns="jabber:client" from="me@example.com/l" to="bob@example.com" type="chat" id="n6"><displayed xmlns="urn:xmpp:chat-markers:0" id="c1"/><body>`+secret+` carbon marker</body></message></forwarded></sent></message>`)
 	_ = x.HandleMatrixTyping(context.Background(), &bridgev2.MatrixTyping{Portal: &bridgev2.Portal{Portal: &database.Portal{PortalKey: sigKey("bob@example.com"), RoomType: database.RoomTypeDM}}, IsTyping: true})
 	_ = x.HandleMatrixReadReceipt(context.Background(), readMsg(&bridgev2.Portal{Portal: &database.Portal{PortalKey: sigKey("bob@example.com"), RoomType: database.RoomTypeDM}}, mkRow("m1", "bob@example.com", 5, true, "")))
+
+	// MUC invites (mediated, direct, carbon): reason, password and fallback body are content.
+	runHandler(t, x, `<message from="room2@muc.example.com"><x xmlns="http://jabber.org/protocol/muc#user"><invite from="bob@example.com"><reason>`+secret+` reason</reason></invite><password>`+secret+`pw</password></x><body>`+secret+` fb</body></message>`)
+	runHandler(t, x, `<message from="bob@example.com/res" type="normal"><x xmlns="jabber:x:conference" jid="room3@muc.example.com" reason="`+secret+` r2" password="`+secret+`pw2"/><body>`+secret+` fb2</body></message>`)
+	runHandler(t, x, `<message from="me@example.com"><received xmlns="urn:xmpp:carbons:2"><forwarded xmlns="urn:xmpp:forward:0"><message xmlns="jabber:client" from="bob@example.com/res" to="me@example.com" type="normal"><x xmlns="jabber:x:conference" jid="room4@muc.example.com" reason="`+secret+` r3"/><body>`+secret+` fb3</body></message></forwarded></received></message>`)
+	time.Sleep(100 * time.Millisecond)
 
 	out := buf.String()
 	if out == "" {

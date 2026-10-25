@@ -141,6 +141,11 @@ type xmppClient struct {
 	// mucOurOccupantJID maps MUC room JID (bare) to our full occupant JID (room@service/nick) for self-echo filtering.
 	mucOurOccupantJID   map[string]string
 	mucOurOccupantJIDMu sync.RWMutex
+	// inviteSeen / invitePasswords (inviteMu): per-session MUC invite dedupe and the room passwords that
+	// came with invites (memory only, never logged), keyed by lower-case room JID.
+	inviteMu        sync.Mutex
+	inviteSeen      map[string]time.Time
+	invitePasswords map[string]string
 	// avatarFetchHook / avatarStampHook (tests only) replace the vCard fetch and the AvatarFetchedAt stamp.
 	avatarFetchHook func(ctx context.Context, bareJID string) ([]byte, string, string, error)
 	avatarStampHook func(bareJID string)
@@ -243,6 +248,7 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	// Join state belongs to the previous session: forget it before anything of this one can join.
 	x.resetMUCJoinState()
 	x.bm.reset()
+	x.resetInvites()
 	x.sig.reset()
 	span.SetAttributes(attribute.String("xmpp.connect.result", "connected"))
 
@@ -1806,7 +1812,11 @@ func (x *xmppClient) sendMUCJoin(ctx context.Context, roomJIDStr, nick string, h
 	if x.mucJoinHistHook != nil {
 		x.mucJoinHistHook(roomJIDStr, hist)
 	}
-	toks := mucJoinTokens(hist, x.bookmarkPassword(roomJIDStr))
+	pw := x.bookmarkPassword(roomJIDStr)
+	if pw == "" {
+		pw = x.invitePassword(roomJIDStr) // from a MUC invite this session
+	}
+	toks := mucJoinTokens(hist, pw)
 	if x.mucJoinTokensHook != nil {
 		x.mucJoinTokensHook(roomJIDStr, toks)
 	}

@@ -359,6 +359,12 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			attrValue(start.Attr, "id"), ids, string(x.loginID))
 		return nil
 	}
+	// XEP-0045/0249 MUC invite: a notice in the management room, never bridged as a message (the
+	// fallback body is dropped). Live delivery only: carbons and MAM never notify.
+	if inv := ids.inviteFrom(from); inv != nil {
+		x.handleInboundInvite(inv)
+		return nil
+	}
 	// XEP-0353 Jingle Message Initiation (call signalling): surface as a Matrix notice.
 	if jmi != nil {
 		ctx, span := startReceiveSpan("jingle", attrValue(start.Attr, "type"), from, fromBare, attrValue(start.Attr, "id"), false, false, false)

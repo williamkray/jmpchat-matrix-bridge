@@ -202,8 +202,8 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 		}
 	}
 	ids.finish()
-	if ids.Retract != nil {
-		body = "" // XEP-0424 fallback text; never bridge it
+	if ids.Retract != nil || ids.inviteFrom(from) != nil {
+		body = "" // XEP-0424 / MUC invite fallback text; never bridge it
 	}
 	if timestamp.IsZero() {
 		timestamp = time.Now()

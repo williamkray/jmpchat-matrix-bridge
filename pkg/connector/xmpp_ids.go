@@ -49,7 +49,8 @@ type messageIDs struct {
 	// Extras holds the XEP-0308/0085/0333/0184/subject/E2EE signals (see messageExtras); filled while
 	// tracking, the subject is complete once its end element was tracked.
 	Extras       messageExtras
-	subjectDepth int // depth of the <subject> being read; 0 when not inside one
+	invite       *inviteScan // XEP-0045/0249 invite elements; resolved by inviteFrom
+	subjectDepth int         // depth of the <subject> being read; 0 when not inside one
 	subjectBuf   []byte
 }
 
@@ -59,6 +60,10 @@ func (m *messageIDs) track(se xml.StartElement, depth, childDepth int) {
 	if depth == childDepth {
 		m.observe(se, depth)
 	}
+	if m.invite == nil {
+		m.invite = &inviteScan{}
+	}
+	m.invite.start(se, depth, childDepth)
 	if m.scan == nil {
 		m.scan = &retractScan{}
 	}
@@ -74,6 +79,9 @@ func (m *messageIDs) trackChars(cd xml.CharData) {
 		}
 		m.subjectBuf = append(m.subjectBuf, cd...)
 	}
+	if m.invite != nil {
+		m.invite.chars(cd)
+	}
 	if m.scan != nil {
 		m.scan.chars(cd)
 	}
@@ -86,6 +94,9 @@ func (m *messageIDs) trackEnd(depth int) {
 		m.Extras.Subject = &s
 		m.subjectDepth = 0
 		m.subjectBuf = m.subjectBuf[:0]
+	}
+	if m.invite != nil {
+		m.invite.end(depth)
 	}
 	if m.scan != nil {
 		m.scan.end(depth)
