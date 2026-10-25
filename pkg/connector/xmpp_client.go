@@ -148,6 +148,9 @@ type xmppClient struct {
 	inviteMu        sync.Mutex
 	inviteSeen      map[string]time.Time
 	invitePasswords map[string]string
+	inviteActed     []time.Time // times of the invites acted on (hourly cap)
+	// inviteMembershipHook (tests only) replaces the lookup of the user's Matrix membership in a room.
+	inviteMembershipHook func(room id.RoomID) (event.Membership, bool)
 	// avatarFetchHook / avatarStampHook (tests only) replace the vCard fetch and the AvatarFetchedAt stamp.
 	avatarFetchHook func(ctx context.Context, bareJID string) ([]byte, string, string, error)
 	avatarStampHook func(bareJID string)
@@ -1324,6 +1327,17 @@ func (x *xmppClient) getMUCChatInfo(ctx context.Context, portal *bridgev2.Portal
 				Membership:  event.MembershipJoin,
 			},
 		},
+	}
+	// An invite-pending portal (MUC invite not accepted yet) keeps the user merely invited: a resync
+	// must never join the double puppet. Once the Matrix room exists the member list is left alone.
+	if portal != nil {
+		if meta, _ := portal.Metadata.(*PortalMetadata); meta != nil && meta.MUCInvitePending {
+			if portal.MXID == "" {
+				members = x.inviteMemberList()
+			} else {
+				members = nil
+			}
+		}
 	}
 	// The placeholder/disco topic is only for portal creation. Once the Matrix room exists the live
 	// subject (queueMUCSubject, re-sent by the room on every join) owns the topic; returning one here

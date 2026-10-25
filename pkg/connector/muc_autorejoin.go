@@ -367,12 +367,24 @@ func (x *xmppClient) setMUCLeft(ctx context.Context, roomBare string, left bool)
 		}
 		meta = &PortalMetadata{}
 	}
-	if meta.MUCLeft == left {
+	if !applyMUCLeft(meta, left) {
 		return nil
 	}
-	meta.MUCLeft = left
 	portal.Metadata = meta
 	return portal.Save(ctx)
+}
+
+// applyMUCLeft sets the left flag; clearing it (a join) also ends an invite-pending state. It reports
+// whether anything changed.
+func applyMUCLeft(meta *PortalMetadata, left bool) bool {
+	if meta.MUCLeft == left && (left || !meta.MUCInvitePending) {
+		return false
+	}
+	meta.MUCLeft = left
+	if !left {
+		meta.MUCInvitePending = false
+	}
+	return true
 }
 
 // lookupMUCPortal returns the existing portal of a room for this login (nil when there is none).

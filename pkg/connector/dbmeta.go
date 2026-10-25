@@ -18,6 +18,11 @@ type PortalMetadata struct {
 	// MUCLeft is set by an explicit `leave` and cleared by the next join; a left room is not
 	// re-joined automatically on connect (muc_autorejoin.go).
 	MUCLeft bool `json:"muc_left,omitempty"`
+	// MUCInvitePending is set (together with MUCLeft) on a portal created or re-invited from an XMPP
+	// MUC invite until the user accepts the Matrix invite (xmpp_invite.go). It is a separate flag so
+	// that resyncs keep the user merely invited (getMUCChatInfo) and only accepting joins the room;
+	// a plain left room (MUCLeft alone) keeps its user joined in Matrix. Cleared by the next join.
+	MUCInvitePending bool `json:"muc_invite_pending,omitempty"`
 }
 
 // GhostMetadata stores ghost user metadata for profile refresh tracking.

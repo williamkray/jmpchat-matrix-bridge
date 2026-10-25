@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,7 +16,10 @@ import (
 func hookClient() (*xmppClient, *[]bridgev2.RemoteEvent) {
 	x := newOuterFromTestClient()
 	var got []bridgev2.RemoteEvent
+	var mu sync.Mutex // invites queue from their own goroutines
 	x.queueHook = func(evt bridgev2.RemoteEvent) bridgev2.EventHandlingResult {
+		mu.Lock()
+		defer mu.Unlock()
 		got = append(got, evt)
 		return bridgev2.EventHandlingResultSuccess
 	}
