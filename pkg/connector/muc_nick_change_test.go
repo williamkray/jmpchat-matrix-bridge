@@ -425,3 +425,17 @@ func TestPastOwnOccupantNotAttributed(t *testing.T) {
 		t.Fatalf("sender=%+v pastOwnOccupant=%v", m.sender, m.pastOwnOccupant)
 	}
 }
+
+// A case-only match of a pending nick change never claims the error of a join in flight under exactly
+// that nick (the join's error must reach the join handling).
+func TestTakeMUCNickChangeForSkipsPendingJoinCaseMatch(t *testing.T) {
+	x := &xmppClient{}
+	x.mucNickChanges = map[string]*mucNickChange{"r@c.example.com": {want: "Wreck"}}
+	x.mucPendingJoin = map[string]string{"r@c.example.com": "wreck"}
+	if ch := x.takeMUCNickChangeFor("r@c.example.com", "wreck"); ch != nil {
+		t.Fatal("case-only match claimed the join's error")
+	}
+	if ch := x.takeMUCNickChangeFor("r@c.example.com", "Wreck"); ch == nil {
+		t.Fatal("exact match not taken")
+	}
+}

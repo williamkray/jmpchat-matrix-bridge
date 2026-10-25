@@ -231,6 +231,19 @@ func TestProfileChangeEqualsGlobalIgnored(t *testing.T) {
 	r.nothingHappened(t)
 }
 
+// A global rename makes Synapse rewrite every member event with the NEW global name. A cached (stale)
+// global name must not turn that into a per-room name, or the user would be renamed in every MUC.
+func TestProfileChangeStaleGlobalCacheRefetched(t *testing.T) {
+	r := newSyncRig(t)
+	r.joined("alice")
+	if g, err := r.x.globalDisplayName(context.Background(), false); err != nil || g != "Global Name" {
+		t.Fatalf("prime cache: %q %v", g, err)
+	}
+	r.global = "New Global" // the profile changed; the cache still holds the old name
+	r.profile("New Global", "Global Name")
+	r.nothingHappened(t)
+}
+
 func TestProfileChangeGlobalFetchFails(t *testing.T) {
 	r := newSyncRig(t)
 	r.joined("alice")

@@ -262,6 +262,12 @@ func (x *xmppClient) takeMUCNickChangeFor(roomBare, nick string) *mucNickChange 
 	if ch == nil || !(ch.want == nick || strings.EqualFold(ch.want, nick)) {
 		return nil
 	}
+	// A case-only match never claims the error of a join in flight under exactly that nick.
+	if ch.want != nick {
+		if pn, ok := x.mucPendingJoin[roomBare]; ok && pn == nick {
+			return nil
+		}
+	}
 	delete(x.mucNickChanges, roomBare)
 	if ch.timer != nil {
 		ch.timer.Stop()

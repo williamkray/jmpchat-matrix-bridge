@@ -164,7 +164,13 @@ func (x *xmppClient) runNickSyncOut(portalID networkid.PortalID, r *nickSyncReq)
 	if err != nil || !x.nickSyncPortalOK(portal) {
 		return
 	}
-	global, err := x.globalDisplayName(ctx)
+	// A cached global name may be stale: after a global rename Synapse rewrites the member event of every
+	// room with the NEW global name, which must never look like a per-room name (it would rename the user
+	// in every MUC). A name that differs from the cache is checked against a fresh profile.
+	global, err := x.globalDisplayName(ctx, false)
+	if err == nil && r.display != global {
+		global, err = x.globalDisplayName(ctx, true)
+	}
 	if err != nil {
 		log.Warn().Err(err).Str("room", room).Msg("Cannot read the global display name, room nick not synced")
 		return
@@ -210,10 +216,11 @@ func (x *xmppClient) runNickSyncOut(portalID networkid.PortalID, r *nickSyncReq)
 	}
 }
 
-// globalDisplayName returns the user's global Matrix display name (cached globalProfileTTL).
-func (x *xmppClient) globalDisplayName(ctx context.Context) (string, error) {
+// globalDisplayName returns the user's global Matrix display name (cached globalProfileTTL; fresh skips
+// the cache).
+func (x *xmppClient) globalDisplayName(ctx context.Context, fresh bool) (string, error) {
 	x.globalNameMu.Lock()
-	if !x.globalNameAt.IsZero() && time.Since(x.globalNameAt) < globalProfileTTL {
+	if !fresh && !x.globalNameAt.IsZero() && time.Since(x.globalNameAt) < globalProfileTTL {
 		name := x.globalName
 		x.globalNameMu.Unlock()
 		return name, nil
@@ -351,7 +358,9 @@ func (x *xmppClient) writeOwnDisplayname(ctx context.Context, dp bridgev2.Matrix
 		newRaw[k] = v
 	}
 	newRaw["displayname"] = name
-	for _, k := range []string{"reason", appservice.DoublePuppetKey, appservice.DoublePuppetTSKey, "com.beeper.member_rollback"} {
+	// join_authorised_via_users_server is only valid on the original restricted join (the server would
+	// check its signature again), so it is dropped like Element's /myroomnick does.
+	for _, k := range []string{"reason", "join_authorised_via_users_server", appservice.DoublePuppetKey, appservice.DoublePuppetTSKey, "com.beeper.member_rollback"} {
 		delete(newRaw, k)
 	}
 	if x.memberSetHook != nil {
