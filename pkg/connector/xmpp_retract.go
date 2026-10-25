@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -93,6 +94,12 @@ const maxRefAliasCandidates = 5
 // has ref under one of keys. `->>` with a bare key works on Postgres jsonb and on SQLite >= 3.38.
 // Column names are bridgev2's `message` table (pinned to the mautrix version; a test runs the real schema).
 func aliasMessageIDs(ctx context.Context, db *database.Database, portal networkid.PortalKey, keys []string, ref string) ([]networkid.MessageID, error) {
+	return aliasMessageIDsSince(ctx, db, portal, keys, ref, time.Time{})
+}
+
+// aliasMessageIDsSince is aliasMessageIDs restricted to rows with timestamp >= since (bridgev2 stores
+// timestamps as Unix nanoseconds); a zero since adds no restriction.
+func aliasMessageIDsSince(ctx context.Context, db *database.Database, portal networkid.PortalKey, keys []string, ref string, since time.Time) ([]networkid.MessageID, error) {
 	if ref == "" || len(keys) == 0 {
 		return nil, nil
 	}
@@ -108,9 +115,15 @@ func aliasMessageIDs(ctx context.Context, db *database.Database, portal networki
 		}
 		cond += fmt.Sprintf("metadata->>'%s'=$4", k)
 	}
-	query := fmt.Sprintf(`SELECT id FROM message WHERE bridge_id=$1 AND room_id=$2 AND room_receiver=$3 AND (%s) ORDER BY timestamp DESC LIMIT %d`,
-		cond, maxRefAliasCandidates)
-	rows, err := db.Query(ctx, query, db.BridgeID, portal.ID, portal.Receiver, ref)
+	args := []any{db.BridgeID, portal.ID, portal.Receiver, ref}
+	timeCond := ""
+	if !since.IsZero() {
+		timeCond = " AND timestamp >= $5"
+		args = append(args, since.UnixNano())
+	}
+	query := fmt.Sprintf(`SELECT id FROM message WHERE bridge_id=$1 AND room_id=$2 AND room_receiver=$3%s AND (%s) ORDER BY timestamp DESC LIMIT %d`,
+		timeCond, cond, maxRefAliasCandidates)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

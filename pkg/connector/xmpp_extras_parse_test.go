@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -64,7 +65,7 @@ func TestExtrasMAMPath(t *testing.T) {
 
 func TestExtrasDirectChildrenOnly(t *testing.T) {
 	_, _, ids := parseFull(t, `<message type="chat"><wrap xmlns="urn:example:wrap"><replace xmlns="urn:xmpp:message-correct:0" id="X"/><displayed xmlns="urn:xmpp:chat-markers:0" id="Y"/><subject>no</subject><encrypted xmlns="urn:xmpp:omemo:2"/></wrap></message>`)
-	if ids.Extras != (messageExtras{}) {
+	if !reflect.DeepEqual(ids.Extras, messageExtras{}) {
 		t.Errorf("nested elements recognized: %+v", ids.Extras)
 	}
 }
@@ -77,7 +78,7 @@ func TestExtrasNamespaceResolved(t *testing.T) {
 	}
 	// Carbons <received> and elements in a foreign namespace are not receipts/corrections.
 	_, _, ids = parseFull(t, `<message type="chat"><received xmlns="urn:xmpp:carbons:2" id="R"/><replace xmlns="urn:example:other" id="R"/><displayed xmlns="urn:example:other" id="R"/></message>`)
-	if ids.Extras != (messageExtras{}) {
+	if !reflect.DeepEqual(ids.Extras, messageExtras{}) {
 		t.Errorf("foreign namespaces recognized: %+v", ids.Extras)
 	}
 }

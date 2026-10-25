@@ -407,9 +407,26 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		x.log.Debug().Str("from", attrValue(start.Attr, "from")).Msg("Skipping message without body, OOB or reactions (chat state, marker or receipt)")
 		return nil
 	}
-	msgID := attrValue(start.Attr, "id")
-	if msgID == "" {
-		msgID = "xmp:" + time.Now().Format("20060102150405.000")
+	// Event time and id (computed before the group-MMS body rewrite below): a trusted XEP-0203 stamp
+	// (offline storage, transport) is the message time; an id-less message gets a deterministic id.
+	now := time.Now()
+	delay := trustedDelay(ids.Extras, now, dmDelayTrust(x.ownScope(), fromBare))
+	ts := delay
+	if ts.IsZero() {
+		ts = now
+	}
+	idAttr := attrValue(start.Attr, "id")
+	msgID := string(inboundMessageID(inboundIDs{
+		idAttr: idAttr, originID: ids.OriginID, stanzaID: ids.stanzaIDBy(string(x.loginID)), scope: x.ownScope(),
+		delay: delay, senderFull: from, body: body, oob: oobURL,
+	}))
+	if idAttr == "" {
+		// Residual case R1 diagnostic (content-free): does a server that omits ids still stamp them?
+		x.log.Debug().
+			Bool("has_archive_id", ids.stanzaIDBy(string(x.loginID)) != "").
+			Bool("has_origin_id", ids.OriginID != "").
+			Bool("has_delay", !delay.IsZero()).
+			Msg("Inbound 1:1 message without id attribute")
 	}
 	kind := "message"
 	if reactionTarget != "" {
@@ -469,7 +486,8 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 				replyID:        "",
 				reactionTarget: reactionTarget,  // XEP-0444 reaction target message ID
 				reactionEmojis: []string{emoji}, // Single emoji per event
-				timestamp:      time.Now(),
+				timestamp:      ts,
+				idAttr:         idAttr,
 				x:              x, // Store reference to xmppClient for database access
 			})
 		}
@@ -490,7 +508,8 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			reactionEmojis: reactionEmojis,                    // XEP-0444 reaction emojis (empty for non-reactions)
 			stanzaID:       ids.stanzaIDBy(string(x.loginID)), // archive id assigned by our own server (untrusted `by` ignored)
 			originID:       ids.OriginID,
-			timestamp:      time.Now(),
+			timestamp:      ts,
+			idAttr:         idAttr,
 			markable:       ids.Extras.Markable,
 			receipt:        x.receiptFor(ids.Extras, attrValue(start.Attr, "type"), attrValue(start.Attr, "id"), from),
 			x:              x, // Store reference to xmppClient for database access
@@ -638,10 +657,19 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 		}, networkid.PortalKey{ID: networkid.PortalID(strings.ToLower(roomJID)), Receiver: x.loginID}, corrSender)
 		return nil
 	}
-	msgID := attrValue(start.Attr, "id")
-	if msgID == "" {
-		msgID = "xmp:" + time.Now().Format("20060102150405.000")
+	// Event time and id, from the raw body (before parseBodyReaction below): a XEP-0045 history stamp
+	// from the room is the message time; an id-less message gets a deterministic id.
+	now := time.Now()
+	delay := trustedDelay(ids.Extras, now, mucDelayTrust(roomJID))
+	ts := delay
+	if ts.IsZero() {
+		ts = now
 	}
+	idAttr := attrValue(start.Attr, "id")
+	msgID := string(inboundMessageID(inboundIDs{
+		idAttr: idAttr, originID: ids.OriginID, stanzaID: ids.stanzaIDBy(roomJID), scope: strings.ToLower(roomJID),
+		delay: delay, senderFull: occupantFull, body: body, oob: oobURL,
+	}))
 	kind := "message"
 	if reactionTarget != "" {
 		kind = "reaction"
@@ -712,7 +740,8 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 				groupchat:      true,
 				reactionTarget: reactionTarget,
 				reactionEmojis: []string{emoji},
-				timestamp:      time.Now(),
+				timestamp:      ts,
+				idAttr:         idAttr,
 				x:              x,
 			})
 		}
@@ -735,7 +764,8 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			originID:       ids.OriginID,
 			occupantID:     ids.OccupantID,
 			markable:       ids.Extras.Markable,
-			timestamp:      time.Now(),
+			timestamp:      ts,
+			idAttr:         idAttr,
 			x:              x,
 		})
 	}
@@ -842,10 +872,7 @@ func (x *xmppClient) handleIncomingMessage(msg stanza.Message, rw xmlstream.Toke
 		Receiver: x.loginID,
 	}
 	x.addPortalIDForMAMCatchUp(string(portalKey.ID))
-	msgID := networkid.MessageID(msg.ID)
-	if msgID == "" {
-		msgID = networkid.MessageID("xmp:" + time.Now().Format("20060102150405.000"))
-	}
+	msgID := inboundMessageID(inboundIDs{idAttr: msg.ID})
 	// For Cheogram group MMS, the real sender may be in the From resource or in the body prefix <xmpp:JID>.
 	senderJID := fromBare
 	if individuals, ok := ParseCheogramGroupMMSJID(fromBare); ok && len(individuals) > 0 {
@@ -933,10 +960,7 @@ func (x *xmppClient) handleIncomingGroupchat(msg stanza.Message, rw xmlstream.To
 		x.ensureMUCGhostTraced(context.Background(), occupantFull)
 	}
 	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
-	msgID := networkid.MessageID(msg.ID)
-	if msgID == "" {
-		msgID = networkid.MessageID("xmp:" + time.Now().Format("20060102150405.000"))
-	}
+	msgID := inboundMessageID(inboundIDs{idAttr: msg.ID})
 	sender := x.mucMessageSender(roomJID, occupantFull)
 	x.queueRemoteEvent(context.Background(), &jabberRemoteMessage{
 		portalKey:      portalKey,
@@ -1098,6 +1122,7 @@ type jabberRemoteMessage struct {
 	// whose `by` is a trusted entity (room for groupchat, our account for 1:1 and MAM).
 	stanzaID       string
 	originID       string
+	idAttr         string          // raw `id` attribute of the stanza ("" when missing); used by the cross-path dedupe
 	occupantID     string          // XEP-0421, groupchat only
 	backfillSource string          // "mam" for events that came out of the archive
 	encrypted      string          // encrypted message kind (encKind*); body and oobURL were cleared, a notice is bridged
@@ -1114,7 +1139,17 @@ var (
 	_ bridgev2.RemoteReactionRemove           = (*jabberRemoteMessage)(nil)
 	_ bridgev2.RemoteEventWithContextMutation = (*jabberRemoteMessage)(nil)
 	_ bridgev2.RemotePostHandler              = (*jabberRemoteMessage)(nil)
+	_ bridgev2.RemoteEventWithTimestamp       = (*jabberRemoteMessage)(nil)
 )
+
+// GetTimestamp returns the event time: the archive time of a MAM item, the trusted XEP-0203 stamp of a
+// replayed message, or the receive time (also when no time was set).
+func (m *jabberRemoteMessage) GetTimestamp() time.Time {
+	if m.timestamp.IsZero() {
+		return time.Now()
+	}
+	return m.timestamp
+}
 
 // parseBodyReaction detects body-based reaction format used by some clients (e.g. "message-id🥳> quoted text").
 // Returns reaction target message ID, emoji, and true if body matches; otherwise empty and false.
@@ -1358,6 +1393,12 @@ func (m *jabberRemoteMessage) ConvertMessage(ctx context.Context, portal *bridge
 	// echo-table entry of a message the bridge sent expired) must not be bridged a second time.
 	if m.isOwnMUCReplay(ctx) {
 		zerolog.Ctx(ctx).Debug().Msg("Ignoring replayed MUC message from our own nick that is already bridged")
+		return nil, bridgev2.ErrIgnoringRemoteEvent
+	}
+	// The same message already bridged through another path (live, carbon, MAM, history) under a
+	// different id: same sender, same trusted stanza-id / origin-id / id attribute.
+	if m.isBridgedDuplicate(ctx) {
+		zerolog.Ctx(ctx).Debug().Msg("Ignoring message already bridged through another path")
 		return nil, bridgev2.ErrIgnoringRemoteEvent
 	}
 	cm, err := m.convertMessage(ctx, portal, intent)

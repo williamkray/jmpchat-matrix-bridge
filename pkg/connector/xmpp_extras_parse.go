@@ -3,6 +3,7 @@ package connector
 import (
 	"encoding/xml"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -25,18 +26,39 @@ const (
 	emeKindPrefix = "eme:"
 )
 
+// maxDelayRefs bounds how many direct-child <delay> elements one stanza can make us remember.
+const maxDelayRefs = 4
+
+// delayRef is one parsed XEP-0203 <delay from stamp/> child (untrusted; see trustedDelay).
+type delayRef struct {
+	From  string
+	Stamp time.Time
+}
+
+// parseDelayStamp parses a XEP-0082 date-time (CCYY-MM-DDThh:mm:ss[.sss]Z).
+func parseDelayStamp(s string) (time.Time, bool) {
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
+
 // messageExtras holds the XEP-0308/0085/0333/0184/0045-subject/E2EE signals found as DIRECT children of a
 // <message>. Untrusted sender data; consumers validate.
 type messageExtras struct {
-	Replace         string  // <replace xmlns=correctNS id>; "" none
-	ChatState       string  // "active","composing","paused","inactive","gone"; "" none
-	Markable        bool    // <markable xmlns=markersNS/>
-	Displayed       string  // <displayed xmlns=markersNS id>
-	ReceiptRequest  bool    // <request xmlns=receiptsNS/>
-	ReceiptReceived string  // <received xmlns=receiptsNS id>
-	Subject         *string // <subject> (stanza namespace); non-nil even when empty (= subject cleared)
-	Delayed         bool    // direct-child <delay xmlns=delayNS>: a replayed (history/offline) stanza, not a live one
-	Encryption      string  // "omemo","omemo2","openpgp","pgp","eme:<ns>"; "" none
+	Replace         string     // <replace xmlns=correctNS id>; "" none
+	ChatState       string     // "active","composing","paused","inactive","gone"; "" none
+	Markable        bool       // <markable xmlns=markersNS/>
+	Displayed       string     // <displayed xmlns=markersNS id>
+	ReceiptRequest  bool       // <request xmlns=receiptsNS/>
+	ReceiptReceived string     // <received xmlns=receiptsNS id>
+	Subject         *string    // <subject> (stanza namespace); non-nil even when empty (= subject cleared)
+	Delayed         bool       // direct-child <delay xmlns=delayNS>: a replayed (history/offline) stanza, not a live one
+	Delays          []delayRef // direct-child <delay> elements with a parsable stamp (max maxDelayRefs)
+	Encryption      string     // "omemo","omemo2","openpgp","pgp","eme:<ns>"; "" none
 }
 
 // isStanzaNS reports whether a resolved namespace is one a <subject> child of a (possibly forwarded)
@@ -85,6 +107,10 @@ func (e *messageExtras) observe(se xml.StartElement) (subject bool) {
 	case delayNS:
 		if se.Name.Local == "delay" {
 			e.Delayed = true
+			from := attrValue(se.Attr, "from")
+			if stamp, ok := parseDelayStamp(attrValue(se.Attr, "stamp")); ok && len(from) <= maxStableIDLen && len(e.Delays) < maxDelayRefs {
+				e.Delays = append(e.Delays, delayRef{From: from, Stamp: stamp})
+			}
 		}
 	case omemoLegacyNS:
 		if se.Name.Local == "encrypted" {

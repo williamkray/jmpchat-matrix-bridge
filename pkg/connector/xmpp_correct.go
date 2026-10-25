@@ -510,10 +510,11 @@ func foldedCorrectionKeys(login networkid.UserLoginID, portal networkid.PortalID
 		if id == "" {
 			continue
 		}
-		origID := f.orig.StanzaID
-		if origID == "" {
-			origID = "xmp:" + f.orig.Timestamp.Format("20060102150405.000")
-		}
+		// The id FetchMessages gives the original (mamItemMessageID is a pure function of the login).
+		origID := string(inboundMessageID(inboundIDs{
+			idAttr: f.orig.StanzaID, originID: f.orig.OriginID, stanzaID: f.orig.ArchiveID,
+			scope: strings.ToLower(bareJID(string(login))),
+		}))
 		for _, sc := range senderScopes(bareJID(f.corr.From), "") {
 			out[correctedKey(login, portal, sc, id)] = origID
 		}

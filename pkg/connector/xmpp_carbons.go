@@ -194,10 +194,17 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 		Receiver: x.loginID,
 	}
 	x.addPortalIDForMAMCatchUp(string(portalKey.ID))
-	msgID := networkid.MessageID(id)
-	if msgID == "" {
-		msgID = networkid.MessageID("xmp:" + time.Now().Format("20060102150405.000"))
+	// The inner message's direct-child delay (offline storage) is the message time.
+	now := time.Now()
+	delay := trustedDelay(ids.Extras, now, dmDelayTrust(x.ownScope(), toBare))
+	ts := delay
+	if ts.IsZero() {
+		ts = now
 	}
+	msgID := inboundMessageID(inboundIDs{
+		idAttr: id, originID: ids.OriginID, stanzaID: ids.stanzaIDBy(string(x.loginID)), scope: x.ownScope(),
+		delay: delay, senderFull: from, body: body,
+	})
 	sender := x.makeEventSender(string(x.loginID)) // "from me" for puppeting
 	x.maybeTriggerBackfillOnNewPortal(ctx, portalKey)
 	x.logFor(ctx).Debug().
@@ -211,7 +218,8 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 		id:        msgID,
 		encrypted: encKind,
 		body:      qBody,
-		timestamp: time.Now(),
+		timestamp: ts,
+		idAttr:    id,
 		x:         x,
 		stanzaID:  ids.stanzaIDBy(string(x.loginID)),
 		originID:  ids.OriginID,
@@ -295,10 +303,17 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 		Receiver: x.loginID,
 	}
 	x.addPortalIDForMAMCatchUp(string(portalKey.ID))
-	msgID := networkid.MessageID(id)
-	if msgID == "" {
-		msgID = networkid.MessageID("xmp:" + time.Now().Format("20060102150405.000"))
+	// The inner message's direct-child delay (offline storage) is the message time.
+	now := time.Now()
+	delay := trustedDelay(ids.Extras, now, dmDelayTrust(x.ownScope(), fromBare))
+	ts := delay
+	if ts.IsZero() {
+		ts = now
 	}
+	msgID := inboundMessageID(inboundIDs{
+		idAttr: id, originID: ids.OriginID, stanzaID: ids.stanzaIDBy(string(x.loginID)), scope: x.ownScope(),
+		delay: delay, senderFull: from, body: body,
+	})
 	sender := x.makeEventSender(fromBare)
 	x.maybeTriggerBackfillOnNewPortal(ctx, portalKey)
 	zerolog.Ctx(context.Background()).Debug().
@@ -312,7 +327,8 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 		id:        msgID,
 		encrypted: encKind,
 		body:      qBody,
-		timestamp: time.Now(),
+		timestamp: ts,
+		idAttr:    id,
 		x:         x,
 		stanzaID:  ids.stanzaIDBy(string(x.loginID)),
 		originID:  ids.OriginID,

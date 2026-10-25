@@ -44,7 +44,7 @@ type mamResultItem struct {
 	From     string
 	To       string
 	Type     string
-	StanzaID string // inner message `id` attribute (or a generated xmp: id)
+	StanzaID string // inner message `id` attribute; empty when missing (the row id then comes from mamItemMessageID)
 	// ArchiveID is the <result id> (the archive's stanza-id, assigned by our own server); OriginID is
 	// the inner XEP-0359 origin-id. Both are only populated for results that passed the outer-from check.
 	ArchiveID string
@@ -207,9 +207,6 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 	}
 	if timestamp.IsZero() {
 		timestamp = time.Now()
-	}
-	if stanzaID == "" {
-		stanzaID = "xmp:" + time.Now().Format("20060102150405.000")
 	}
 	archiveID := attrValue(start.Attr, "id")
 	if archiveID == "" {
@@ -448,18 +445,22 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 			continue
 		}
 		sender := x.makeEventSender(fromBare)
-		msgID := networkid.MessageID(item.StanzaID)
-		if msgID == "" {
-			msgID = networkid.MessageID("xmp:" + item.Timestamp.Format("20060102150405.000"))
+		msgID := x.mamItemMessageID(item)
+		// Already bridged (live copy, earlier backfill): not backfilled a second time.
+		if x.mamItemAlreadyBridged(ctx, portalKey, item, msgID, sender) {
+			continue
 		}
 		stanzaID, originID := item.stableIDs()
+		if originID == string(msgID) {
+			originID = ""
+		}
 		content := mamBackfillContent(item)
 		cm := &bridgev2.ConvertedMessage{
 			Parts: []*bridgev2.ConvertedMessagePart{{
 				Type:    event.EventMessage,
 				Content: content,
 				DBMetadata: &MessageMetadata{
-					XMPPMessageID:  item.StanzaID,
+					XMPPMessageID:  string(msgID),
 					StanzaID:       stanzaID,
 					OriginID:       originID,
 					BackfillSource: "mam",
@@ -696,44 +697,16 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 		if item.Retracted || x.mamItemHidden(ctx, portalKey, item, batchRetracted) {
 			continue
 		}
-		msgID := networkid.MessageID(item.StanzaID)
-		if msgID == "" {
-			continue
-		}
-		existing, _ := x.conn.br.DB.Message.GetFirstPartByID(ctx, x.loginID, msgID)
-		if existing != nil {
-			continue
-		}
-		// GetFirstPartByID finds XMPP-originated messages (ID = stanza ID). Matrix-originated messages
-		// use ID = matrix:$eventId and store stanza ID in metadata. Search portal for metadata match.
-		searchStart := item.Timestamp.Add(-2 * time.Minute)
-		if searchStart.After(end) {
-			searchStart = end.Add(-5 * time.Minute)
-		}
-		dbMessages, err := x.conn.br.DB.Message.GetMessagesBetweenTimeQuery(ctx, portalKey, searchStart, end.Add(time.Minute))
-		if err == nil {
-			for _, msg := range dbMessages {
-				if msg.Metadata != nil {
-					if meta, ok := msg.Metadata.(*MessageMetadata); ok && meta != nil && meta.XMPPMessageID == item.StanzaID {
-						existing = msg
-						break
-					}
-				}
-				if string(msg.ID) == item.StanzaID {
-					existing = msg
-					break
-				}
-			}
-		}
-		if existing != nil {
-			continue
-		}
 		// Skip ephemeral/chat state notifications (no body).
 		if item.Body == "" {
 			continue
 		}
 		senderJID, bodyOut := ResolveCheogramGroupMMSSenderForMAM(item.From, item.Body)
 		sender := x.makeEventSender(senderJID)
+		msgID := x.mamItemMessageID(item)
+		if x.mamItemAlreadyBridged(ctx, portalKey, item, msgID, sender) {
+			continue
+		}
 		stanzaID, originID := item.stableIDs()
 		ts := item.Timestamp
 		if ts.IsZero() {
@@ -747,6 +720,7 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 			encrypted: encKind,
 			body:      qBody,
 			timestamp: ts,
+			idAttr:    item.StanzaID,
 			x:         x,
 			stanzaID:  stanzaID,
 			originID:  originID,
@@ -890,38 +864,12 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 		if x.mamItemHidden(ctx, portalKey, item, batchRetracted) {
 			continue
 		}
-		msgID := networkid.MessageID(item.StanzaID)
-		if msgID == "" {
-			continue
-		}
-		existing, _ := x.conn.br.DB.Message.GetFirstPartByID(ctx, x.loginID, msgID)
-		if existing != nil {
-			continue
-		}
-		searchStart := item.Timestamp.Add(-2 * time.Minute)
-		if searchStart.After(end) {
-			searchStart = end.Add(-5 * time.Minute)
-		}
-		dbMessages, err := x.conn.br.DB.Message.GetMessagesBetweenTimeQuery(ctx, portalKey, searchStart, end.Add(time.Minute))
-		if err == nil {
-			for _, msg := range dbMessages {
-				if msg.Metadata != nil {
-					if meta, ok := msg.Metadata.(*MessageMetadata); ok && meta != nil && meta.XMPPMessageID == item.StanzaID {
-						existing = msg
-						break
-					}
-				}
-				if string(msg.ID) == item.StanzaID {
-					existing = msg
-					break
-				}
-			}
-		}
-		if existing != nil {
-			continue
-		}
 		senderJID, bodyOut := ResolveCheogramGroupMMSSenderForMAM(item.From, item.Body)
 		sender := x.makeEventSender(senderJID)
+		msgID := x.mamItemMessageID(item)
+		if x.mamItemAlreadyBridged(ctx, portalKey, item, msgID, sender) {
+			continue
+		}
 		stanzaID, originID := item.stableIDs()
 		ts := item.Timestamp
 		if ts.IsZero() {
@@ -935,6 +883,7 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 			encrypted: encKind,
 			body:      qBody,
 			timestamp: ts,
+			idAttr:    item.StanzaID,
 			x:         x,
 			stanzaID:  stanzaID,
 			originID:  originID,
