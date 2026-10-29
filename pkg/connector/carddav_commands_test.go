@@ -260,7 +260,9 @@ func TestCardDAVSyncPreviewAndApplyDetached(t *testing.T) {
 		vc("Ann", "555 111 2222"), vc("Bob", "555 111 3333"), brokenVCard,
 		"BEGIN:VCARD\nVERSION:3.0\nFN:Multi\nTEL;TYPE=CELL:555 222 0001\nTEL;TYPE=WORK:555 222 0002\nEND:VCARD")
 	h := newCDHarness(t, testCardDAVCfg(), true)
-	h.client.rosterJIDs["+15551113333@cheogram.com"] = struct{}{} // Bob is already in the roster
+	h.client.rosterJIDs["+15551113333@cheogram.com"] = struct{}{} // Bob is already in the roster (named)
+	h.client.roster = map[string]string{"+15551113333@cheogram.com": "Bob"}
+	h.client.rosterJIDs["+15551112222@cheogram.com"] = struct{}{} // Ann is in the roster without a name
 	h.run(CardDAVSyncCommand, "later")
 	if !strings.Contains(h.bot.last(), "Usage:") {
 		t.Fatalf("usage: %q", h.bot.last())
@@ -282,13 +284,13 @@ func TestCardDAVSyncPreviewAndApplyDetached(t *testing.T) {
 		t.Fatalf("started text missing: %q", all)
 	}
 	prev := h.bot.last()
-	for _, want := range []string{"CardDAV preview: 3 contacts read, 3 numbers would be added, 1 already in your roster, 1 skipped (1 bad_card).",
-		"Ann: +15551112222 (other)", "Multi (mobile): +15552220001 (mobile)", "Multi (work): +15552220002 (work)", "`!jc carddav-sync apply`"} {
+	for _, want := range []string{"CardDAV preview: 3 contacts read, 2 numbers would be added, 1 unnamed roster entry would get a name, 1 already in your roster, 1 skipped (1 bad_card).",
+		"Ann: +15551112222 (other), names the existing roster entry", "Multi (mobile): +15552220001 (mobile)", "Multi (work): +15552220002 (work)", "`!jc carddav-sync apply`"} {
 		if !strings.Contains(prev, want) {
 			t.Errorf("preview lacks %q:\n%s", want, prev)
 		}
 	}
-	if len(h.client.rosterJIDs) != 1 {
+	if len(h.client.rosterJIDs) != 2 || h.client.lookupRosterName("+15551112222@cheogram.com") != "" {
 		t.Fatal("preview wrote to the roster")
 	}
 	if strings.Contains(all, f.pass) {

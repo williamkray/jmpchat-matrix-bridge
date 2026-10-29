@@ -7,10 +7,11 @@ import (
 	"unicode/utf8"
 )
 
-func jidSet(jids ...string) map[string]struct{} {
-	m := map[string]struct{}{}
+// jidSet is a roster of named entries.
+func jidSet(jids ...string) map[string]string {
+	m := map[string]string{}
 	for _, j := range jids {
-		m[j] = struct{}{}
+		m[j] = "Someone"
 	}
 	return m
 }
@@ -31,7 +32,7 @@ func TestPlanCardDAVSync(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		contacts []cardContact
-		roster   map[string]struct{}
+		roster   map[string]string
 		want     []string
 		already  int
 		skipped  map[string]int

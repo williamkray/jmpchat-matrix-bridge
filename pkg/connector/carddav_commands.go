@@ -216,8 +216,8 @@ func CardDAVStatusCommand(ce *commands.Event) {
 		if last.Apply {
 			kind = "sync"
 		}
-		fmt.Fprintf(&b, "\nLast %s (%s): %d contacts read, %d numbers planned, %d added, %d already in your roster, %d skipped, %d failed, outcome %s.",
-			kind, last.At.Format(time.RFC3339), last.Read, last.Planned, last.Added, last.Already, last.Skipped, last.Failed, last.Outcome)
+		fmt.Fprintf(&b, "\nLast %s (%s): %d contacts read, %d numbers planned, %d added, %d unnamed entries planned to name, %d named, %d already in your roster, %d skipped, %d failed, outcome %s.",
+			kind, last.At.Format(time.RFC3339), last.Read, last.Planned, last.Added, last.PlanNames, last.Named, last.Already, last.Skipped, last.Failed, last.Outcome)
 	}
 	ce.Reply("%s", b.String())
 }
@@ -268,7 +268,7 @@ func CardDAVSyncCommand(ce *commands.Event) {
 		snapshot: x.rosterSnapshot, fetch: fetchContacts,
 		env: execEnv{
 			setItem:  x.SetRosterItem,
-			inRoster: func(j string) bool { in, _ := x.inRoster(j); return in },
+			rosterOf: x.rosterEntryName,
 			loggedIn: x.IsLoggedIn,
 			wait:     sleepCtx,
 			perSec:   cardDAVAddsPerSecond,
@@ -287,7 +287,9 @@ func CardDAVSyncCommand(ce *commands.Event) {
 		log := telemetry.Logger(ctx, &clean)
 		ev.Ctx, ev.Log = ctx, log
 		job.log = log
-		job.env.debug = func(jid string) { log.Debug().Str("jid", jid).Msg("CardDAV roster add") }
+		job.env.debug = func(jid string, fill bool) {
+			log.Debug().Str("jid", jid).Bool("named_existing", fill).Msg("CardDAV roster write")
+		}
 		job.reply = func(text string) { ev.Reply("%s", text) }
 		job.run(ctx, span)
 	}()

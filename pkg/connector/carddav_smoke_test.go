@@ -28,13 +28,13 @@ func TestCardDAVSmoke(t *testing.T) {
 		t.Fatalf("fetch: %v", err)
 	}
 	t.Logf("cards=%d contacts=%d books_ok=%d books_failed=%d bytes=%d skips=%v", s.Cards, len(s.Contacts), s.BooksOK, s.BooksFailed, s.Bytes, s.Skips)
-	rosterJIDs := map[string]struct{}{}
+	roster := map[string]string{}
 	if j := strings.ToLower(os.Getenv("CARDDAV_SMOKE_ROSTER_JID")); j != "" {
-		rosterJIDs[j] = struct{}{}
+		roster[j] = "Smoke"
 	}
-	p := planCardDAVSync(s.Contacts, rosterJIDs, s.Skips)
+	p := planCardDAVSync(s.Contacts, roster, s.Skips)
 	for _, a := range p.Adds {
 		t.Logf("add: %-28s %s (%s)", a.Name, a.JID, a.Label)
 	}
-	t.Logf("plan: read=%d adds=%d already_in_roster=%d skipped=%q", p.Read, len(p.Adds), p.AlreadyInRoster, skippedSummary(p.Skipped))
+	t.Logf("plan: read=%d adds=%d names=%d already_in_roster=%d skipped=%q", p.Read, len(p.Adds), len(p.Names), p.AlreadyInRoster, skippedSummary(p.Skipped))
 }

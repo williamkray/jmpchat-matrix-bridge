@@ -414,15 +414,15 @@ Not expected: XMPP stanza receipt before mux dispatch, Serve start and stop, pre
 
 ## CardDAV contact import
 
-The bridge can read a CardDAV address book (Nextcloud, SOGo, Radicale, Fastmail and similar) and add the phone numbers in it to your Jabber roster as Cheogram contacts (`+E164@cheogram.com`), named after the contact. It only reads the address book (never writes to it), only adds roster entries (never renames or removes), and only runs when you ask it to. Requires `network.cheogram: true`.
+The bridge can read a CardDAV address book (Nextcloud, SOGo, Radicale, Fastmail and similar) and add the phone numbers in it to your Jabber roster as Cheogram contacts (`+E164@cheogram.com`), named after the contact. It only reads the address book (never writes to it), never removes roster entries and never renames a named one (it only fills in the name of an entry that has none), and only runs when you ask it to. Requires `network.cheogram: true`.
 
 **Commands** (prefix `!jabber`):
 
 | Command | Description |
 |---------|-------------|
 | `carddav-login` | Set up the CardDAV account. Run it in the management room without arguments; the bridge asks for the server URL, username, password and an optional address-book name (one message each; the password message is deleted). It connects and discovers the address books before saving anything |
-| `carddav-sync` | Preview only: shows how many numbers would be added (and up to 20 of them), nothing is written |
-| `carddav-sync apply` | Add the missing numbers to the roster (rate limited, at most 500 per run; run it again to continue). The result arrives as a later message |
+| `carddav-sync` | Preview only: shows how many numbers would be added or would get a name (and up to 20 of them), nothing is written |
+| `carddav-sync apply` | Add the missing numbers to the roster and name the unnamed entries (rate limited, at most 500 roster changes per run; run it again to continue). The result arrives as a later message |
 | `carddav-status` | Show the server, the masked username, the address books and the last sync of this bridge run |
 | `carddav-logout` | Remove the stored account. Contacts already added to the roster stay |
 
@@ -437,7 +437,7 @@ iCloud's contacts live on `pNN-contacts.icloud.com` hosts; absolute links on the
 
 Without an address-book name the bridge syncs every address book it finds except generated ones (Nextcloud "Recently contacted", SOGo "collected addresses"). An address book that cannot be read (for example a huge shared or LDAP-backed list that refuses a full listing) is skipped and counted; the other books are still synced. Give an address-book name at login to sync only that one.
 
-**What is imported**: TEL numbers of individual contacts. A contact with one number is saved under its name (FN, else N, NICKNAME or ORG). With several numbers each entry is `Name (label)`: `mobile`, `work`, `home`, `main`, `other`, or the contact's own custom label (for example `John Doe (Office)`; Apple `X-ABLabel` groups are understood). A number that already is in the roster (under any name) is left alone, and a number found in several contacts is added once. Skipped, and counted in the summary: contacts without a number or name (`no_number`, `no_name`), unparsable numbers (`invalid`), short codes (`short_code`), numbers with extensions or pauses (`extension`), fax and pager numbers (`fax`), repeated numbers (`duplicate`) and cards the server sent that cannot be parsed (`bad_card`). Numbers without a leading `+` use `network.carddav.default_country_code`. vCard 2.1 is only partly supported (a bare `TEL;CELL:` parameter is salvaged). A contact deleted from the address book, or a roster entry you removed yourself, is not tracked: removed entries come back with the next `carddav-sync apply`.
+**What is imported**: TEL numbers of individual contacts. A contact with one number is saved under its name (FN, else N, NICKNAME or ORG). With several numbers each entry is `Name (label)`: `mobile`, `work`, `home`, `main`, `other`, or the contact's own custom label (for example `John Doe (Office)`; Apple `X-ABLabel` groups are understood). A number that already is in the roster under a name is left alone; one that is in the roster without a name (typically a number you texted before saving it, which shows as the bare number) gets the contact's name, keeping its roster groups; and a number found in several contacts is added once. Skipped, and counted in the summary: contacts without a number or name (`no_number`, `no_name`), unparsable numbers (`invalid`), short codes (`short_code`), numbers with extensions or pauses (`extension`), fax and pager numbers (`fax`), repeated numbers (`duplicate`) and cards the server sent that cannot be parsed (`bad_card`). Numbers without a leading `+` use `network.carddav.default_country_code`. vCard 2.1 is only partly supported (a bare `TEL;CELL:` parameter is salvaged). A contact deleted from the address book, or a roster entry you removed yourself, is not tracked: removed entries come back with the next `carddav-sync apply`.
 
 Imported numbers do not get Matrix rooms until the first message arrives, and the periodic MAM catch-up skips them until then (see Troubleshooting). Each added contact makes the XMPP server push the roster item back, so a large import takes about `adds / 5` seconds and produces a roster refresh per entry. For roster-only calls, imported numbers count as known numbers.
 
@@ -452,7 +452,7 @@ network:
         default_country_code: "1"    # for numbers without a leading +
 ```
 
-By default the bridge refuses CardDAV servers on private or local addresses (and never uses proxy environment variables for CardDAV). A home-lab Radicale or Nextcloud on a private address, a Tailscale/CGNAT address or a Docker network needs `allow_private_hosts: true`; the refusal message names this setting. The limits (5000 contacts per sync, 500 adds per run, 5 adds per second, 32 MiB per response) are fixed.
+By default the bridge refuses CardDAV servers on private or local addresses (and never uses proxy environment variables for CardDAV). A home-lab Radicale or Nextcloud on a private address, a Tailscale/CGNAT address or a Docker network needs `allow_private_hosts: true`; the refusal message names this setting. The limits (5000 contacts per sync, 500 roster changes per run, 5 roster changes per second, 32 MiB per response) are fixed.
 
 **Credentials** are stored in plaintext in the bridge database (login metadata `extra.carddav`), the same trust boundary as the Jabber password and SIP credentials; use an app-specific password where the provider offers one. The credentials are only sent to the host you entered (or one on the same registrable domain). Commands that take the password are only accepted in the management room; the password message is redacted. Spans and logs contain counts, outcomes and the server host, never names, usernames, passwords, URL paths or vCard content.
 

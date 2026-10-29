@@ -151,8 +151,10 @@ type xmppClient struct {
 	roster map[string]string
 	// rosterJIDs holds every bare JID of the roster, named or not (roster is names only). rosterLoaded
 	// is set by the first complete roster fetch of this client; before that rosterJIDs may be partial.
-	// All three are guarded by rosterMu and only written by applyRosterItems.
+	// rosterGroups holds the roster groups of the entries that have any, so a rename keeps them.
+	// All four are guarded by rosterMu and only written by applyRosterItems.
 	rosterJIDs   map[string]struct{}
+	rosterGroups map[string][]string
 	rosterLoaded bool
 	rosterMu     sync.RWMutex
 	// mucCache caches disco-based MUC detection per JID so we don't re-query every time.
@@ -658,7 +660,9 @@ func (x *xmppClient) SetRosterItem(ctx context.Context, jidStr, displayName stri
 		return fmt.Errorf("not connected to Jabber")
 	}
 
-	item := roster.Item{JID: parsed, Name: strings.TrimSpace(displayName)}
+	// A roster set replaces the whole item (RFC 6121 2.3), so the groups the entry already has are sent
+	// again; otherwise naming an existing contact would drop it from its groups.
+	item := roster.Item{JID: parsed, Name: strings.TrimSpace(displayName), Group: x.rosterGroupsOf(key)}
 	setCtx, setSpan := telemetry.StartChild(ctx, "xmpp.roster.set", trace.WithSpanKind(trace.SpanKindClient))
 	if setSpan.IsRecording() {
 		setSpan.SetAttributes(attribute.String("xmpp.iq.namespace", "jabber:iq:roster"), attribute.String("xmpp.peer.jid", key))
@@ -671,7 +675,7 @@ func (x *xmppClient) SetRosterItem(ctx context.Context, jidStr, displayName stri
 	}
 
 	// Update local cache and refresh Matrix so the user sees the new name without waiting for a push.
-	x.applyRosterItems(false, rosterEntry{jid: key, name: item.Name})
+	x.applyRosterItems(false, rosterEntry{jid: key, name: item.Name, groups: item.Group})
 
 	x.logFor(ctx).Debug().Str("jid", key).Msg("Roster item set from Matrix") // no name: bulk imports (CardDAV) would log every contact
 	x.refreshRosterGhostsAndPortals(ctx, map[string]string{strings.ToLower(key): item.Name})
@@ -784,7 +788,7 @@ func (x *xmppClient) fetchRoster(ctx context.Context, sess rosterFetcher) (names
 		if item.Name != "" {
 			names[key] = item.Name
 		}
-		entries = append(entries, rosterEntry{jid: key, name: item.Name, remove: item.Subscription == "remove"})
+		entries = append(entries, rosterEntry{jid: key, name: item.Name, groups: item.Group, remove: item.Subscription == "remove"})
 	}
 	err = iter.Err()
 	if cerr := iter.Close(); cerr != nil {
@@ -910,9 +914,10 @@ func (x *xmppClient) refreshGroupMMSPortals(ctx context.Context, rosterMap map[s
 
 // rosterEntry is one roster item as applied to the cache.
 type rosterEntry struct {
-	jid    string // lowercase bare JID
-	name   string // "" = the contact has no roster name
-	remove bool   // subscription=remove: the contact is gone
+	jid    string   // lowercase bare JID
+	name   string   // "" = the contact has no roster name
+	groups []string // roster groups (RFC 6121 <group/>), kept on renames
+	remove bool     // subscription=remove: the contact is gone
 }
 
 // applyRosterItems is the single write path of the roster cache (sync, push and set). With replace the
@@ -927,6 +932,9 @@ func (x *xmppClient) applyRosterItems(replace bool, items ...rosterEntry) {
 	if replace || x.rosterJIDs == nil {
 		x.rosterJIDs = make(map[string]struct{})
 	}
+	if replace || x.rosterGroups == nil {
+		x.rosterGroups = make(map[string][]string)
+	}
 	if replace {
 		x.rosterLoaded = true
 	}
@@ -937,9 +945,15 @@ func (x *xmppClient) applyRosterItems(replace bool, items ...rosterEntry) {
 		if it.remove {
 			delete(x.roster, it.jid)
 			delete(x.rosterJIDs, it.jid)
+			delete(x.rosterGroups, it.jid)
 			continue
 		}
 		x.rosterJIDs[it.jid] = struct{}{}
+		if len(it.groups) > 0 {
+			x.rosterGroups[it.jid] = append([]string(nil), it.groups...)
+		} else {
+			delete(x.rosterGroups, it.jid)
+		}
 		if it.name != "" {
 			x.roster[it.jid] = it.name
 		} else {
@@ -971,6 +985,16 @@ func (x *xmppClient) countRoster(match func(bareJID string) bool) (n int, loaded
 	return n, x.rosterLoaded
 }
 
+// rosterGroupsOf returns a copy of the roster groups of the bare JID (any case), nil when it has none.
+func (x *xmppClient) rosterGroupsOf(bareJID string) []string {
+	x.rosterMu.RLock()
+	defer x.rosterMu.RUnlock()
+	if g := x.rosterGroups[strings.ToLower(bareJID)]; len(g) > 0 {
+		return append([]string(nil), g...)
+	}
+	return nil
+}
+
 // lookupRosterName returns the roster name for the given bare JID, if available.
 // Keys are stored in lowercase so we normalize the lookup.
 func (x *xmppClient) lookupRosterName(bareJID string) string {
@@ -983,7 +1007,8 @@ func (x *xmppClient) lookupRosterName(bareJID string) string {
 }
 
 // SearchRoster searches the roster for contacts matching the query string.
-// Matches against both JID and display name (case-insensitive partial match).
+// Matches against both JID and display name (case-insensitive partial match); entries without a
+// roster name are included (matched by JID, Name "").
 func (x *xmppClient) SearchRoster(ctx context.Context, query string) ([]RosterContact, error) {
 	query = strings.ToLower(strings.TrimSpace(query))
 	if query == "" {
@@ -996,16 +1021,26 @@ func (x *xmppClient) SearchRoster(ctx context.Context, query string) ([]RosterCo
 	x.rosterMu.RLock()
 	defer x.rosterMu.RUnlock()
 
-	if x.roster == nil || len(x.roster) == 0 {
+	if len(x.rosterJIDs) == 0 {
 		return []RosterContact{}, nil
 	}
 
+	// A formatted phone number ("555-777-0100", "(555) 777 0100") also matches by digits against the
+	// JID's local part, so Cheogram contacts are found the way the number is usually written.
+	var digits string
+	if looksLikePhone(query) {
+		digits = onlyDigits(query)
+	}
+
 	var results []RosterContact
-	for jid, name := range x.roster {
+	for jid := range x.rosterJIDs {
+		name := x.roster[jid]
 		jidLower := strings.ToLower(jid)
 		nameLower := strings.ToLower(name)
+		local, _, _ := strings.Cut(jidLower, "@")
 		// Match if query appears in JID or name
-		if strings.Contains(jidLower, query) || strings.Contains(nameLower, query) {
+		if strings.Contains(jidLower, query) || strings.Contains(nameLower, query) ||
+			(digits != "" && strings.Contains(onlyDigits(local), digits)) {
 			results = append(results, RosterContact{
 				JID:  jid,
 				Name: name,
@@ -1014,6 +1049,17 @@ func (x *xmppClient) SearchRoster(ctx context.Context, query string) ([]RosterCo
 	}
 
 	return results, nil
+}
+
+// onlyDigits returns the ASCII digits of s.
+func onlyDigits(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // ensureRosterSynced checks if the roster cache is empty and synchronously syncs it if needed.
@@ -1053,7 +1099,7 @@ func (x *xmppClient) handleRosterPush(ver string, item roster.Item) error {
 	}
 	key := strings.ToLower(bareJID)
 
-	x.applyRosterItems(false, rosterEntry{jid: key, name: item.Name, remove: item.Subscription == "remove"})
+	x.applyRosterItems(false, rosterEntry{jid: key, name: item.Name, groups: item.Group, remove: item.Subscription == "remove"})
 
 	// No name in the log line: bulk roster changes (CardDAV import) would log every contact name.
 	x.log.Debug().

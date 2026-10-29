@@ -11,7 +11,8 @@ import (
 
 type fakeExec struct {
 	set       []string
-	inRoster  map[string]bool
+	inRoster  map[string]bool // named entries
+	unnamed   map[string]bool // entries without a name
 	failFor   map[string]error
 	loggedIn  bool
 	waits     []time.Duration
@@ -35,7 +36,12 @@ func (f *fakeExec) env(maxAdds int) execEnv {
 			}
 			return nil
 		},
-		inRoster: func(jid string) bool { return f.inRoster[jid] },
+		rosterOf: func(jid string) (string, bool) {
+			if f.inRoster[jid] {
+				return "Named", true
+			}
+			return "", f.unnamed[jid]
+		},
 		loggedIn: func() bool { return f.loggedIn },
 		wait: func(ctx context.Context, d time.Duration) error {
 			f.waits = append(f.waits, d)

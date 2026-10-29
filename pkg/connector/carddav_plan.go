@@ -12,20 +12,24 @@ type rosterAdd struct {
 	Name  string
 	E164  string
 	Label string
+	Fill  bool // the JID is already in the roster without a name: only the name is set
 }
 
-// cardDAVPlan is the planner output: entries to add and counters.
+// cardDAVPlan is the planner output: entries to add, unnamed entries to name, and counters.
 type cardDAVPlan struct {
 	Adds            []rosterAdd
+	Names           []rosterAdd    // roster entries without a name that get the contact's name (Fill set)
 	Read            int            // contacts considered
-	AlreadyInRoster int            // numbers skipped because the JID is already in the roster
+	AlreadyInRoster int            // numbers skipped because the JID is already in the roster with a name
 	Skipped         map[string]int // by reason
 }
 
 // planCardDAVSync is pure and deterministic; the preview and `apply` run the same function.
-// rosterJIDs holds the lowercased bare JIDs of the roster (named or not). extraSkips are counts from
-// earlier stages (extraction, bad cards) merged into the result.
-func planCardDAVSync(contacts []cardContact, rosterJIDs map[string]struct{}, extraSkips map[string]int) cardDAVPlan {
+// roster maps the lowercased bare JIDs of the roster to their roster name ("" = no name). A named entry
+// is never renamed; an unnamed one (typically a number you chatted with before it was in the address
+// book) gets the contact's name. extraSkips are counts from earlier stages (extraction, bad cards)
+// merged into the result.
+func planCardDAVSync(contacts []cardContact, roster map[string]string, extraSkips map[string]int) cardDAVPlan {
 	p := cardDAVPlan{Read: len(contacts), Skipped: map[string]int{}}
 	for k, v := range extraSkips {
 		p.Skipped[k] += v
@@ -71,14 +75,27 @@ func planCardDAVSync(contacts []cardContact, rosterJIDs map[string]struct{}, ext
 			} else {
 				name = truncateRunes(name, maxContactNameRunes)
 			}
-			if _, in := rosterJIDs[jid]; in {
-				p.AlreadyInRoster++
+			add := rosterAdd{JID: jid, Name: name, E164: n.E164, Label: n.Label}
+			if cur, in := roster[jid]; in {
+				if strings.TrimSpace(cur) != "" {
+					p.AlreadyInRoster++
+					continue
+				}
+				add.Fill = true
+				p.Names = append(p.Names, add)
 				continue
 			}
-			p.Adds = append(p.Adds, rosterAdd{JID: jid, Name: name, E164: n.E164, Label: n.Label})
+			p.Adds = append(p.Adds, add)
 		}
 	}
 	return p
+}
+
+// writes is everything apply writes, in order: names for unnamed entries first (they are chats that
+// already exist), then adds.
+func (p cardDAVPlan) writes() []rosterAdd {
+	out := make([]rosterAdd, 0, len(p.Names)+len(p.Adds))
+	return append(append(out, p.Names...), p.Adds...)
 }
 
 // skippedSummary renders skip counts as "3 no_number, 1 invalid" in a fixed order ("" if none).
