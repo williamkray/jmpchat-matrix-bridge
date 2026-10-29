@@ -73,7 +73,7 @@ func main() {
 		// database layer refuses to start if the stored owner differs, so renaming without
 		// this would lock every existing deployment out of its database. Never change it.
 		DBOwner:   "megabridge/mautrix-jabber",
-		Version:   "0.13.0" + buildVariant,
+		Version:   "0.13.1" + buildVariant,
 		Connector: &connector.JabberConnector{},
 	}
 	br.PostInit = func() {
