@@ -7,6 +7,7 @@ import (
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 )
 
 // backfillChatAsync must do nothing (and start no goroutine that touches the nil session) when
@@ -49,5 +50,24 @@ func TestMAMEligible(t *testing.T) {
 	}
 	if mamEligible("+15550003333@cheogram.com", nil, nil) {
 		t.Error("unknown number with nil sets must not be eligible")
+	}
+}
+
+// An archived bounce from a room carries our own rejected message's body; it must never reach the
+// MAM collector (it was bridged as the room itself saying our message).
+func TestMAMDropsArchivedErrorBounce(t *testing.T) {
+	x := newOuterFromTestClient()
+	ch := x.mam.register("q1", networkid.PortalKey{ID: "room@conference.example.com", Receiver: x.loginID}, false)
+	inner := `<message xmlns="jabber:client" from="room@conference.example.com" to="me@example.com/bridge" type="error" id="m1">` +
+		`<body>my own words</body>` +
+		`<error type="cancel"><service-unavailable xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></message>`
+	r, start := startOfMessage(t, `<message to="me@example.com"><result xmlns="urn:xmpp:mam:2" queryid="q1" id="A1"><forwarded xmlns="urn:xmpp:forward:0"><delay xmlns="urn:xmpp:delay" stamp="2026-01-01T00:00:00Z"/>`+inner+`</forwarded></result></message>`)
+	if err := x.handleMessageWithOOB(r, &start); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case it := <-ch:
+		t.Fatalf("error bounce delivered as MAM item: %+v", it)
+	default:
 	}
 }

@@ -202,6 +202,14 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 		}
 	}
 	ids.finish()
+	// A bounce (type=error) is archived by some servers (Prosody stores bounces addressed to a full
+	// JID) and carries the rejected message's own body: from a room it would be bridged as the room
+	// itself saying our message. Live bounces go to handleMessageError; archived ones are never
+	// messages.
+	if msgType == "error" {
+		x.log.Debug().Str("query_id", queryID).Msg("Dropping archived MAM error stanza (bounce)")
+		return nil
+	}
 	if ids.Retract != nil || ids.inviteFrom(from) != nil {
 		body = "" // XEP-0424 / MUC invite fallback text; never bridge it
 	}

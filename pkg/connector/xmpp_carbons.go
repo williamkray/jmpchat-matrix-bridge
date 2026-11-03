@@ -129,6 +129,9 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 		x.log.Debug().Err(err).Msg("Failed to parse carbon <sent> inner message")
 		return nil
 	}
+	if typeAttr == "error" {
+		return nil // a bounce is never a message (XEP-0280 forbids carbons of errors; defensive)
+	}
 	// A retraction made from another of our clients (outer from was validated above).
 	if ids.Retract != nil {
 		if toBare := strings.ToLower(bareJID(to)); toBare != "" && typeAttr != "groupchat" {
@@ -240,6 +243,9 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 	if err != nil {
 		x.log.Debug().Err(err).Msg("Failed to parse carbon <received> inner message")
 		return nil
+	}
+	if typeAttr == "error" {
+		return nil // a bounce is never a message (XEP-0280 forbids carbons of errors; defensive)
 	}
 	// A retraction received on another of our clients (outer from was validated above).
 	if ids.Retract != nil {
