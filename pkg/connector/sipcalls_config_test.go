@@ -77,8 +77,8 @@ func yamlKeys(t reflect.Type) []string {
 func TestCallsExampleConfig(t *testing.T) {
 	c := &JabberConnector{}
 	example, _, _ := c.GetConfig()
-	if !strings.Contains(example, "cheogram: false\n# SIP calls for Cheogram numbers") {
-		t.Fatalf("calls block not appended after cheogram:\n%s", example)
+	if !strings.Contains(example, "\n"+callsExampleConfig()) {
+		t.Fatalf("calls block not appended to the example:\n%s", example)
 	}
 	node := networkNode(t, example)
 	cfg, err := decodeCallsConfig(node)
