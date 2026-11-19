@@ -18,7 +18,6 @@ import (
 	"maunium.net/go/mautrix/appservice"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
-	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
@@ -596,7 +595,7 @@ func TestSendOwnMemberPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	as := &matrix.ASIntent{Matrix: &appservice.IntentAPI{Client: cli}}
+	as := rawIntentFake{api: &appservice.IntentAPI{Client: cli}}
 	if err := x.sendOwnMember(context.Background(), as, "!room:x", content); err != nil {
 		t.Fatal(err)
 	}
@@ -613,3 +612,11 @@ func TestSendOwnMemberPaths(t *testing.T) {
 		t.Fatalf("fallback err=%v sent=%v", err, f.sent)
 	}
 }
+
+// rawIntentFake stands in for *matrix.ASIntent (its fields are unexported since mautrix v0.33).
+type rawIntentFake struct {
+	bridgev2.MatrixAPI
+	api *appservice.IntentAPI
+}
+
+func (r rawIntentFake) Matrix() *appservice.IntentAPI { return r.api }

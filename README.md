@@ -112,7 +112,7 @@ app_service_config_files:
   - /path/to/registration.yaml
 ```
 
-**If using end-to-bridge encryption (E2BE):** You must also add experimental features to `homeserver.yaml` and add MSC flags to the registration file (see [End-to-bridge encryption (E2BE)](#optional-end-to-bridge-encryption-e2be) below) before restarting.
+**If using end-to-bridge encryption (E2BE):** You must also add experimental features to `homeserver.yaml` and make sure the registration file has the MSC flags (see [End-to-bridge encryption (E2BE)](#optional-end-to-bridge-encryption-e2be) below) before restarting.
 
 Restart the homeserver. It should start without error; if it does not, check `registration.yaml` for valid YAML and correct `url`/`namespaces`.
 
@@ -136,7 +136,7 @@ The bridge will listen on `appservice.hostname` and `appservice.port`. When the 
 
 To use **encrypted Matrix rooms** and hide messages from the homeserver. If using this with JMP.chat/Cheogram, remember that ALL SMS OVER THE CHEOGRAM BRIDGE AND PSTN IS PLAINTEXT, THIS DOES NOT MAKE YOUR CONVERSATIONS PRIVATE! This is recommended to remain disabled if you run your own matrix server for performance benefits.
 
-To enable, configure encryption in three places: the bridge config, Synapse's `homeserver.yaml`, and the appservice registration file.
+To enable, configure encryption in three places: the bridge config, Synapse's `homeserver.yaml`, and the appservice registration file. The notes below were checked against Synapse 1.165 and Matrix spec v1.19.
 
 #### 1. Bridge configuration
 
@@ -172,30 +172,31 @@ Add the following experimental features to your Synapse `homeserver.yaml`:
 
 ```yaml
 experimental_features:
-  # Required: Enable MSC3202 device masquerading (for older Synapse <1.141)
-  msc3202_device_masquerading: true
-  # Required: Enable MSC2409 to-device messages via appservice transactions
+  # Required: to-device messages in appservice transactions (MSC4203, formerly part of MSC2409)
   msc2409_to_device_messages_enabled: true
-  # Required: Enable MSC3202 transaction extensions for ephemeral events
+  # Required: device list changes and one-time key counts in appservice transactions (MSC3202)
   msc3202_transaction_extensions: true
 ```
 
-**Note:** For Synapse 1.141+, `msc3202_device_masquerading` may not be required, but the other two flags are still needed for appservice mode encryption.
+**Older Synapse (before 1.141):** also add `msc3202_device_masquerading: true`. Device masquerading is in the Matrix spec since v1.17 (MSC4326) and Synapse 1.141 removed that flag; on newer versions it does nothing. The two flags above are still experimental and still required.
 
 #### 3. Appservice registration file
 
-Add the following fields to your `registration.yaml`:
+Generating the registration with `-g` after setting up the bridge config writes these keys for you: `appservice.ephemeral_events: true` (the default) gives both `receive_ephemeral` and `de.sorunome.msc2409.push_ephemeral`, `encryption.appservice: true` gives `org.matrix.msc3202`, and `encryption.msc4190: true` gives `io.element.msc4190`. If you keep an existing `registration.yaml`, add them by hand:
 
 ```yaml
-# Required: Enable MSC2409 ephemeral events (to-device messages) via appservice transactions
+# Required: ephemeral events in appservice transactions (MSC2409, Matrix spec v1.13).
+# Synapse 1.156+ reads the stable key; older Synapse only the unstable one. Keep both.
+receive_ephemeral: true
 de.sorunome.msc2409.push_ephemeral: true
-# Required: Enable MSC4190 device management
-io.element.msc4190: true
-# Required: Enable MSC3202 device masquerading and transaction extensions
+# Required: encrypted appservice extensions (MSC3202, still experimental)
 org.matrix.msc3202: true
+# Optional on Synapse 1.141+ (MSC4190 is in spec v1.17): only forbids the legacy appservice login.
+# Needed on older Synapse.
+io.element.msc4190: true
 ```
 
-**Important:** Use `de.sorunome.msc2409.push_ephemeral` (not `ephemeral_events`). Synapse checks for this specific key.
+`receive_ephemeral` here is the registration key; `appservice.ephemeral_events` is the bridge config option that produces it.
 
 After updating the registration file, restart Synapse to load the new configuration.
 
@@ -207,13 +208,13 @@ Once configured correctly:
 - The bridge bot's device (`@jabberbot:your.domain`) will be used to encrypt messages sent by ghost users
 - You may see a client warning: **"the sender of the event does not match the owner of the device that sent it"**
 
-This warning is **expected and harmless** with MSC3202 device masquerading. The bridge bot's device encrypts messages on behalf of ghost users, which causes clients to show this verification notice. Messages are encrypted and decrypted correctly. To suppress the warning, verify the bridge bot's device (`@jabberbot:your.domain`, device ID shown in logs) in your Matrix client.
+This warning is **expected and harmless** with appservice device masquerading. The bridge bot's device encrypts messages on behalf of ghost users, which causes clients to show this verification notice. Messages are encrypted and decrypted correctly. To suppress the warning, verify the bridge bot's device (`@jabberbot:your.domain`, device ID shown in logs) in your Matrix client.
 
 #### 5. Troubleshooting E2BE
 
 **Issue:** Bridge logs show "no group session created" or "Didn't get session, giving up trying to decrypt event"
 
-- **Check:** Verify `de.sorunome.msc2409.push_ephemeral: true` is in registration (not `ephemeral_events`)
+- **Check:** Verify the registration has `receive_ephemeral: true` (Synapse 1.156+) or `de.sorunome.msc2409.push_ephemeral: true` (any version)
 - **Check:** Verify `msc2409_to_device_messages_enabled: true` and `msc3202_transaction_extensions: true` are in Synapse `experimental_features`
 - **Check:** Verify `encryption.appservice: true` in bridge config
 - **Check:** Restart Synapse after registration changes
@@ -501,7 +502,7 @@ A room joined before this was fixed (for example on a Snikket `groups.` domain) 
 
 **Changing your nick.** `!jabber muc-nick <room> <nick>` changes your nick at once when the bridge is in the room (a plain XEP-0045 nick-change presence, so the room does not replay history) and the bridge bot posts the result as a notice. The new nick is stored as the room's explicit nick only once the room confirms it; a taken or refused nick changes nothing (no `_1`/`_2` alternatives are tried for an explicit change) and you get a notice saying so. When the bridge is not in the room the nick is stored and used at the next join. `!jabber join` on a room the bridge is already in sends no join presence (that would replay history and the occupant list): under the same nick it just replies that you are already in (and turns the bookmark's auto-join back on), under a different nick (because the nick choice changed) it only changes the nick. Messages of yours that a room replays under a nick you held earlier are recognized as yours and are not bridged a second time.
 
-**Nick sync (`network.muc_nick_sync`, default true).** Your nick in a bridged group chat and your display name in its Matrix room follow each other. Setting a display name for one room (for example `/myroomnick`) changes your nick in that XMPP room after a short pause (3 s, newest name wins); your global Matrix display name is never sent, and resetting a room name to your global name is ignored (it cannot be told apart from a global rename), so to change the nick back use `muc-nick` or set a room name again. A refused change (nick taken, error, no answer) is reported by a notice in that room only and the room display name is set back. On the other side, a nick change on XMPP (a rename by another client sharing the nick, a join under an alternative nick after a conflict, or a nick the room assigned) sets your display name in that Matrix room; this needs double puppeting and does nothing without it. Success produces no notice. Direct chats, Cheogram numbers, left rooms and unanswered invites never take part. Set `muc_nick_sync: false` to turn both directions off.
+**Nick sync (`network.muc_nick_sync`, default true).** Your nick in a bridged group chat and your display name in its Matrix room follow each other. Setting a display name for one room (for example `/myroomnick`) changes your nick in that XMPP room after a short pause (3 s, newest name wins); your global Matrix display name is never sent, and resetting a room name to your global name is ignored (it cannot be told apart from a global rename), so to change the nick back use `muc-nick` or set a room name again. A refused change (nick taken, error, no answer) is reported by a notice in that room only and the room display name is set back. On the other side, a nick change on XMPP (a rename by another client sharing the nick, a join under an alternative nick after a conflict, or a nick the room assigned) sets your display name in that Matrix room; this needs double puppeting and does nothing without it. Success produces no notice. Direct chats, Cheogram numbers, left rooms and unanswered invites never take part. Set `muc_nick_sync: false` to turn both directions off. The Matrix-to-XMPP direction also needs the framework option `bridge.drop_matrix_profile_changes` to stay `false` (the default): with `true`, room display name changes never reach the bridge.
 
 **Auto-rejoin.** After every connect (startup or reconnect) the bridge re-joins, in the background and one room every 0.5 s (at most 200 per connect), each MUC of that account that has a Matrix room, so the room is live (and your presence, messages and avatars flow) without sending into it first. Cheogram numbers and group MMS are never joined. The normal join path is used, so nick choice and conflict handling apply and a remembered working nick does not produce new notices. The join asks the room for the history since the newest message the bridge has for it (at most 7 days and 100 messages back; the last 20 messages when there is none), so messages sent while the bridge was offline arrive once; already bridged messages are dropped as duplicates. `!jabber leave <room>` marks the room as left: it is not re-joined automatically, and neither sending into nor viewing its Matrix room brings it back (sending fails with a notice); only `!jabber join <room>` does. One info line per connect reports how many rooms were joined and skipped.
 
@@ -523,7 +524,7 @@ A room joined before this was fixed (for example on a Snikket `groups.` domain) 
 
 ## Verifying
 
-1. **Registration** – `registration.yaml` is valid YAML and has `id`, `url`, `as_token`, `hs_token`, `sender_localpart`, and `namespaces.users` with `exclusive: true` and regexes that match your `username_template` (e.g. `@jabber_.*`). If using E2BE, verify `de.sorunome.msc2409.push_ephemeral: true`, `io.element.msc4190: true`, and `org.matrix.msc3202: true` are present.
+1. **Registration** – `registration.yaml` is valid YAML and has `id`, `url`, `as_token`, `hs_token`, `sender_localpart`, and `namespaces.users` with `exclusive: true` and regexes that match your `username_template` (e.g. `@jabber_.*`). If using E2BE, verify `org.matrix.msc3202: true` and `receive_ephemeral: true` and/or `de.sorunome.msc2409.push_ephemeral: true` are present (`io.element.msc4190: true` is optional on Synapse 1.141+).
 
 2. **Synapse** – After adding the registration and restarting, Synapse starts and does not reject the file. If using E2BE, verify experimental features (`msc2409_to_device_messages_enabled`, `msc3202_transaction_extensions`) are enabled in `homeserver.yaml`.
 

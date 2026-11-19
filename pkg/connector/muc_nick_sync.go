@@ -434,9 +434,12 @@ func (x *xmppClient) sendOwnMember(ctx context.Context, dp bridgev2.MatrixAPI, r
 	if dp == nil || x.login == nil {
 		return fmt.Errorf("no double puppet")
 	}
-	if as, ok := dp.(*matrix.ASIntent); ok && as != nil && as.Matrix != nil && as.Matrix.Client != nil {
-		_, err := as.Matrix.Client.SendStateEvent(ctx, room, event.StateMember, string(x.login.UserMXID), content)
-		return err
+	// *matrix.ASIntent (an interface, so tests can fake it: its fields are unexported since mautrix v0.33).
+	if as, ok := dp.(interface{ Matrix() *appservice.IntentAPI }); ok {
+		if raw := as.Matrix(); raw != nil && raw.Client != nil {
+			_, err := raw.Client.SendStateEvent(ctx, room, event.StateMember, string(x.login.UserMXID), content)
+			return err
+		}
 	}
 	_, err := dp.SendState(ctx, room, event.StateMember, string(x.login.UserMXID), &event.Content{Raw: content}, time.Now())
 	return err
