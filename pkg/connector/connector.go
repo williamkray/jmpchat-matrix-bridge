@@ -251,6 +251,7 @@ func (c *JabberConnector) GetName() bridgev2.BridgeName {
 	return bridgev2.BridgeName{
 		DisplayName:          "Jabber",
 		NetworkURL:           "https://xmpp.org/",
+		NetworkIcon:          "mxc://mssj.me/8c9d6344cf21c73886985d8b394b11d954e8dbcb2123432196214620160",
 		NetworkID:            "jabber",
 		BeeperBridgeType:     "github.com/williamkray/jmpchat-matrix-bridge",
 		DefaultPort:          29318, // mau.fi/ports or any free port
@@ -368,8 +369,9 @@ func (c *JabberConnector) CreateLogin(ctx context.Context, user *bridgev2.User, 
 }
 
 // GetBridgeInfoVersion returns versions for bridge info and room capabilities.
+// Info 2: NetworkIcon added (re-sends m.bridge so existing rooms get the icon).
 func (c *JabberConnector) GetBridgeInfoVersion() (info, capabilities int) {
-	return 1, 4
+	return 2, 4
 }
 
 // jabberLoginProcess implements LoginProcess and LoginProcessUserInput for JID+password auth.
