@@ -372,7 +372,7 @@ func TestRetractionCapabilities(t *testing.T) {
 	if jabberCapID != "github.com/mautrix/jabber.capabilities.2026_11b" || jabberCaps.ID != jabberCapID {
 		t.Errorf("cap ID = %q / %q", jabberCapID, jabberCaps.ID)
 	}
-	if info, caps := (&JabberConnector{}).GetBridgeInfoVersion(); info != 2 || caps != 4 {
+	if info, caps := (&JabberConnector{}).GetBridgeInfoVersion(); info != 3 || caps != 4 {
 		t.Errorf("bridge info version = %d, %d", info, caps)
 	}
 	var _ bridgev2.RedactionHandlingNetworkAPI = (*xmppClient)(nil)
