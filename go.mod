@@ -8,7 +8,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/rs/xid v1.6.0
 	github.com/rs/zerolog v1.35.1
-	github.com/williamkray/mrtc-sip-bridge v0.3.3
+	github.com/williamkray/mrtc-sip-bridge v0.4.0
 	go.mau.fi/util v0.11.1
 	go.mau.fi/zeroconfig v0.2.0
 	go.opentelemetry.io/otel v1.47.0
