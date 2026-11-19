@@ -165,7 +165,7 @@ func (h *jabberCallHost) MarkReadAsOwner(ctx context.Context, ref core.LoginRef,
 	return hostkit.MarkReadAsOwner(ctx, ul, roomID, eventID)
 }
 
-// decorateChatInfo adds the call.member PL-0 overrides to the chat info of Cheogram 1:1 portals (new
+// decorateChatInfo adds the call PL-0 overrides (call.member, rtc.slot) to the chat info of Cheogram 1:1 portals (new
 // rooms and every resync), keeping other overrides.
 func (x *callsExt) decorateChatInfo(portalID string, info *bridgev2.ChatInfo) {
 	if !x.enabled || info == nil || info.Members == nil {
@@ -204,7 +204,8 @@ func (x *callsExt) suppressCallNotice(loginID networkid.UserLoginID, peerBareJID
 	return lc != nil && lc.acct != nil && lc.registered
 }
 
-// ensureCallPL makes sure the room's owner may publish call.member (bridge bot sends the PL change).
+// ensureCallPL makes sure the room's owner may publish call.member and open the call slot (bridge bot
+// sends the PL change).
 func (x *callsExt) ensureCallPL(ctx context.Context, roomID id.RoomID) (bool, error) {
 	if x.ensurePL != nil {
 		return x.ensurePL(ctx, roomID)

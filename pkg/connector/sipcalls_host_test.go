@@ -111,7 +111,8 @@ func TestDecorateChatInfo(t *testing.T) {
 	x.enabled = true
 	info = newInfo()
 	x.decorateChatInfo("+15551234567@cheogram.com", info)
-	if pl := info.Members.PowerLevels; pl == nil || pl.Events[member] != 0 || pl.Events[alias] != 0 || len(pl.Events) != 2 {
+	if pl := info.Members.PowerLevels; pl == nil || pl.Events[member] != 0 || pl.Events[alias] != 0 ||
+		pl.Events[matrixrtc.RTCSlot] != 0 || pl.Events[matrixrtc.RTCSlotAlias] != 0 || len(pl.Events) != 4 {
 		t.Fatalf("1:1 not decorated: %+v", info.Members.PowerLevels)
 	}
 
@@ -120,7 +121,8 @@ func TestDecorateChatInfo(t *testing.T) {
 	info.Members.PowerLevels = &bridgev2.PowerLevelOverrides{Events: map[event.Type]int{event.StateRoomName: 50, member: 100}, StateDefault: &fifty}
 	x.decorateChatInfo("+15551234567@cheogram.com/res", info)
 	pl := info.Members.PowerLevels
-	if pl.Events[member] != 0 || pl.Events[alias] != 0 || pl.Events[event.StateRoomName] != 50 || pl.StateDefault != &fifty {
+	if pl.Events[member] != 0 || pl.Events[alias] != 0 || pl.Events[matrixrtc.RTCSlot] != 0 ||
+		pl.Events[event.StateRoomName] != 50 || pl.StateDefault != &fifty {
 		t.Fatalf("existing overrides not merged: %+v", pl)
 	}
 
